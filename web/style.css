@@ -1,0 +1,307 @@
+/* Any-KVM Web Console — Dark Theme Stylesheet */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0d0d10;
+  --surface:  #18181f;
+  --border:   #2a2a36;
+  --accent:   #4f8ef7;
+  --accent-h: #6ba3ff;
+  --danger:   #e05555;
+  --ok:       #4caf7d;
+  --warn:     #f0a840;
+  --text:     #dcdce8;
+  --subtext:  #7a7a90;
+  --font:     'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono:     'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  --radius:   8px;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  overflow: hidden;
+}
+
+.hidden { display: none !important; }
+
+/* ─── 连接界面 ─────────────────────────────────────────────────────────────── */
+
+#connect-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.connect-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 36px 40px;
+  width: 460px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4);
+}
+
+.connect-card h1 {
+  font-size: 1.7rem;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: -.01em;
+}
+
+.connect-card .subtitle {
+  text-align: center;
+  color: var(--subtext);
+  font-size: .9rem;
+  margin-top: -8px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--subtext);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.form-group input,
+.turn-section input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: .88rem;
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color .18s;
+  width: 100%;
+}
+
+.form-group input:focus,
+.turn-section input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79,142,247,.15);
+}
+
+/* TURN section */
+.turn-section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: .85rem;
+  color: var(--subtext);
+}
+.turn-section summary { cursor: pointer; user-select: none; }
+.turn-section summary:hover { color: var(--text); }
+.turn-cred-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .2s, opacity .2s;
+}
+.btn-primary:hover  { background: var(--accent-h); }
+.btn-primary:active { opacity: .85; }
+.btn-primary:disabled { background: var(--border); color: var(--subtext); cursor: not-allowed; }
+
+.error-msg {
+  min-height: 1.2em;
+  text-align: center;
+  color: var(--danger);
+  font-size: .85rem;
+}
+
+/* ─── 控制台界面 ─────────────────────────────────────────────────────────────── */
+
+#console-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 工具栏 */
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: .83rem;
+  min-height: 36px;
+}
+
+.room-label {
+  font-family: var(--mono);
+  font-size: .8rem;
+  color: var(--subtext);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer { flex: 1; }
+
+.stats {
+  font-family: var(--mono);
+  font-size: .75rem;
+  color: var(--subtext);
+}
+
+/* 状态徽章 */
+.badge {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 2px 9px;
+  font-size: .74rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.badge-connecting { background: #252530; color: var(--warn); }
+.badge-p2p        { background: #122212; color: var(--ok);  }
+.badge-relay      { background: #2a2010; color: var(--warn); }
+.badge-failed     { background: #251212; color: var(--danger); }
+
+/* 工具按钮 */
+.btn-tool {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  padding: 3px 9px;
+  font-size: .8rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .15s, background .15s;
+}
+.btn-tool:hover  { border-color: var(--accent); background: rgba(79,142,247,.08); }
+.btn-tool:active { background: rgba(79,142,247,.18); }
+.btn-danger:hover { border-color: var(--danger); background: rgba(224,85,85,.08); }
+
+/* 视频区域 */
+#video-container {
+  flex: 1;
+  position: relative;
+  background: #000;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0; /* flex 子项高度不溢出 */
+}
+
+#remote-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 遮罩 */
+#video-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.65);
+  transition: opacity .3s;
+  pointer-events: none;
+}
+#video-overlay.hidden { opacity: 0; }
+
+.overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--subtext);
+  font-size: 1rem;
+}
+
+/* 加载圈 */
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 鼠标/键盘捕获层（覆盖整个视频区域） */
+#mouse-capture {
+  position: absolute;
+  inset: 0;
+  outline: none;
+  cursor: none;        /* 隐藏系统光标，由 CSS 或 JS 绘制 KVM 光标 */
+}
+#mouse-capture:not(.active) {
+  cursor: default;     /* 未激活时显示默认光标 */
+}
+#mouse-capture.active {
+  cursor: none;
+}
+
+/* 状态栏 */
+#statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 3px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--subtext);
+  flex-shrink: 0;
+  min-height: 24px;
+}
+.sb-hint { margin-left: auto; font-style: italic; }
+
+/* 全屏时隐藏工具栏和状态栏 */
+:fullscreen #toolbar,
+:fullscreen #statusbar          { display: none; }
+:-webkit-full-screen #toolbar,
+:-webkit-full-screen #statusbar { display: none; }
+:-moz-full-screen #toolbar,
+:-moz-full-screen #statusbar    { display: none; }
+
+/* 响应式：小屏适配 */
+@media (max-width: 500px) {
+  .connect-card { padding: 24px 20px; }
+  #toolbar { gap: 4px; padding: 4px 8px; }
+  .btn-tool { padding: 2px 6px; }
+}

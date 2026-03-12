@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  # ─── 信令服务器 ─────────────────────────────────────────────────────────────
+  signal:
+    build:
+      context: .
+      dockerfile: Dockerfile.signal
+    container_name: any-kvm-signal
+    restart: unless-stopped
+    ports:
+      - "8080:8080" # WebSocket 信令 + 静态 Web 文件
+    volumes:
+      - ../web:/app/web:ro # 挂载 Web 控制端静态文件
+    environment:
+      - TZ=Asia/Shanghai
+    command: ["-addr", ":8080", "-web", "/app/web"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ─── coturn STUN/TURN 服务 ──────────────────────────────────────────────────
+  coturn:
+    image: coturn/coturn:latest
+    container_name: any-kvm-coturn
+    restart: unless-stopped
+    network_mode: host # 使用 host 模式，coturn 需要感知真实 IP
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
+networks:
+  default:
+    driver: bridge

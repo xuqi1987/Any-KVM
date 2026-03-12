@@ -1,0 +1,58 @@
+[package]
+name        = "any-kvm-agent"
+version     = "0.1.0"
+edition     = "2021"
+description = "Any-KVM device-side agent: video/audio capture + WebRTC P2P"
+authors     = ["Any-KVM Contributors"]
+
+[[bin]]
+name = "any-kvm-agent"
+path = "src/main.rs"
+
+[dependencies]
+# ─── 异步运行时 ───────────────────────────────────────────────────────────────
+tokio          = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util   = "0.3"
+
+# ─── WebRTC ──────────────────────────────────────────────────────────────────
+# str0m: 纯 Rust、无 C 依赖的 WebRTC 实现
+str0m          = "0.5"
+
+# ─── 视频采集（V4L2）──────────────────────────────────────────────────────────
+v4l            = "0.14"
+
+# ─── 视频编码（libx264 软编，硬编通过 V4L2 M2M 直接输出 H.264）────────────────
+openh264       = { version = "0.6", features = ["source"] }
+
+# ─── 音频采集（ALSA）──────────────────────────────────────────────────────────
+alsa           = "0.9"
+
+# ─── 音频编码（Opus）──────────────────────────────────────────────────────────
+audiopus       = "0.3"
+
+# ─── HID 串口（CH9329 回退）────────────────────────────────────────────────────
+serialport     = "4"
+
+# ─── 配置文件 ─────────────────────────────────────────────────────────────────
+toml           = "0.8"
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+
+# ─── 日志 ─────────────────────────────────────────────────────────────────────
+tracing        = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ─── 其他工具 ─────────────────────────────────────────────────────────────────
+anyhow         = "1"
+bytes          = "1"
+url            = "2"
+
+[profile.release]
+opt-level  = 3
+lto        = "thin"
+strip      = true
+panic      = "abort"
+
+[profile.dev]
+opt-level  = 1   # 加快增量编译，降低调试时的 CPU 耗时

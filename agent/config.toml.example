@@ -1,0 +1,56 @@
+# Any-KVM Agent 配置示例
+# 复制为 config.toml 并按需修改
+
+[signal]
+# 信令服务器 WebSocket 地址（生产环境使用 wss://）
+url     = "ws://your-server:8080/ws"
+# 房间 ID，设备端与客户端必须使用相同的房间 ID
+room_id = "kvm-room-1"
+
+[video]
+# V4L2 视频设备节点
+device       = "/dev/video0"
+# 分辨率
+width        = 1280
+height       = 720
+# 帧率（fps）
+fps          = 15
+# 目标码率（kbps）
+bitrate_kbps = 500
+# 是否优先尝试 V4L2 M2M 硬件 H.264 编码
+hw_encode    = true
+
+[audio]
+# ALSA 设备（"default" 或具体设备如 "hw:1,0"）
+device       = "default"
+# 采样率（Hz）
+sample_rate  = 48000
+# 声道数（1=单声道）
+channels     = 1
+# 音频码率（kbps）
+bitrate_kbps = 16
+# 设为 false 关闭音频（减少 CPU 占用）
+enabled      = true
+
+[hid]
+# HID 方式: "gadget"（USB OTG，推荐）或 "ch9329"（外部芯片）
+mode            = "gadget"
+# USB Gadget 键盘设备节点
+keyboard_device = "/dev/hidg0"
+# USB Gadget 鼠标设备节点
+mouse_device    = "/dev/hidg1"
+# CH9329 串口（mode="ch9329" 时生效）
+serial_port     = "/dev/ttyUSB0"
+serial_baud     = 9600
+
+[ice]
+# 公共 STUN 服务器列表（建议配置 2-4 个，提高 P2P 打洞成功率）
+stun_servers = [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+    "stun:stun.cloudflare.com:3478",
+]
+# TURN 服务器（P2P 失败时回退，可留空禁用 TURN）
+turn_url      = "turn:your-server:3478"
+turn_username = "kvmuser"
+turn_password = "change_me_in_production"
