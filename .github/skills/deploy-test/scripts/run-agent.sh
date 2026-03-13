@@ -1,83 +1,36 @@
 #!/usr/bin/env bash
-# run-agent.sh — 在本机生成 config.toml 并运行 agent（前台，Ctrl-C 停止）
+# run-agent.sh — 通过 systemd 管理本机 agent 服务
+#
+# 前置条件：已通过 build-agent.sh（即 scripts/build-and-package.sh --install）安装
+# 本脚本负责：检查安装→重启服务→跟踪日志
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
-CONFIG_FILE="${AGENT_DIR}/config.toml"
-
-echo "==> [1/3] 检查 agent 二进制"
-if [ ! -f "${AGENT_BIN}" ]; then
-    echo "  未找到 release 二进制，先编译..."
+echo "==> [1/3] 检查 agent 安装"
+if ! command -v any-kvm-agent &>/dev/null && [ ! -f /usr/bin/any-kvm-agent ]; then
+    echo "  agent 未安装，先执行编译安装…"
     bash "${SCRIPT_DIR}/build-agent.sh"
 fi
 
-echo "==> [2/3] 生成 config.toml → ${CONFIG_FILE}"
-# 检测显示器
-DISPLAY_VAL="${DISPLAY:-}"
-if [ -z "${DISPLAY_VAL}" ]; then
-    # 尝试自动探测 X11 display
-    if [ -S /tmp/.X11-unix/X0 ]; then
-        DISPLAY_VAL=":0"
-    fi
-fi
+echo "  binary: $(which any-kvm-agent 2>/dev/null || echo /usr/bin/any-kvm-agent)"
 
-# 检测是否有 v4l2 设备
-VIDEO_SOURCE="screen"
-if ls /dev/video* >/dev/null 2>&1; then
-    VIDEO_DEVICE=$(ls /dev/video* | head -1)
-    echo "  检测到视频设备 ${VIDEO_DEVICE}，使用 v4l2 源（失败会自动回退屏幕截图）"
-    VIDEO_SOURCE="v4l2"
+echo "==> [2/3] 确认配置文件"
+CONFIG="/etc/any-kvm-agent/config.toml"
+if [ -f "${CONFIG}" ]; then
+    echo "  配置文件: ${CONFIG}"
+    grep -E '^\s*(url|room_id|source)\s*=' "${CONFIG}" 2>/dev/null || true
 else
-    echo "  未检测到 /dev/video*，使用屏幕截图源"
+    echo "  ⚠️ 配置文件不存在，重新安装…"
+    bash "${SCRIPT_DIR}/build-agent.sh"
 fi
 
-cat > "${CONFIG_FILE}" <<EOF
-[signal]
-url     = "${SIGNAL_URL}"
-room_id = "${ROOM_ID}"
-
-[video]
-source       = "${VIDEO_SOURCE}"
-device       = "${VIDEO_DEVICE:-/dev/video0}"
-width        = 1280
-height       = 720
-fps          = 15
-bitrate_kbps = 500
-hw_encode    = false
-
-[audio]
-device       = "default"
-sample_rate  = 48000
-channels     = 1
-bitrate_kbps = 16
-enabled      = false
-
-[hid]
-mode            = "gadget"
-keyboard_device = "/dev/hidg0"
-mouse_device    = "/dev/hidg1"
-serial_port     = "/dev/ttyUSB0"
-serial_baud     = 9600
-
-[ice]
-stun_servers = [
-    "stun:stun.l.google.com:19302",
-    "stun:stun1.l.google.com:19302",
-    "stun:stun.cloudflare.com:3478",
-]
-# turn_url      = "turn:${REMOTE_HOST}:3478"
-# turn_username = "kvmuser"
-# turn_password = "change_me_in_production"
-EOF
-
-echo "  config.toml 已写入"
-cat "${CONFIG_FILE}"
+echo "==> [3/3] 重启 any-kvm-agent 服务"
+echo "${LOCAL_SUDO_PASS}" | sudo -S systemctl restart any-kvm-agent 2>/dev/null
+sleep 2
+sudo systemctl status any-kvm-agent --no-pager -l
 
 echo ""
-echo "==> [3/3] 启动 agent（Ctrl-C 停止）"
-echo "   信令: ${SIGNAL_URL}"
-echo "   房间: ${ROOM_ID}"
-echo "   视频: ${VIDEO_SOURCE}"
-[ -n "${DISPLAY_VAL}" ] && export DISPLAY="${DISPLAY_VAL}"
-RUST_LOG=any_kvm_agent=debug exec "${AGENT_BIN}" "${CONFIG_FILE}"
+echo "✅ Agent 已通过 systemd 启动"
+echo "   查看日志: journalctl -u any-kvm-agent -f"
+echo "   停止服务: sudo systemctl stop any-kvm-agent"
