@@ -17,13 +17,14 @@ use str0m::media::{Direction, Frequency, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::broadcast;
 use tokio::net::UdpSocket;
 use tracing::{info, warn};
 
 pub async fn run(
     ice_cfg:              IceConfig,
-    mut video_rx:         Receiver<Bytes>,
-    mut audio_rx:         Receiver<Bytes>,
+    mut video_rx:         broadcast::Receiver<Bytes>,
+    mut audio_rx:         broadcast::Receiver<Bytes>,
     hid_tx:               Sender<Bytes>,
     offer_tx:             tokio::sync::oneshot::Sender<String>,
     mut answer_rx:        Receiver<String>,
@@ -67,10 +68,10 @@ pub async fn run(
 
     offer_tx.send(offer_sdp).map_err(|_| anyhow::anyhow!("offer channel closed"))?;
 
-    // ─── 等待 SDP answer ─────────────────────────────────────────────────────
-    let answer_sdp = tokio::time::timeout(Duration::from_secs(60), answer_rx.recv())
+    // ─── 等待 SDP answer（无超时：等浏览器主动连接）──────────────────────────
+    info!("webrtc: waiting for browser to connect…");
+    let answer_sdp = answer_rx.recv()
         .await
-        .context("answer timeout")?
         .context("answer channel closed")?;
     info!("webrtc: received SDP answer");
 

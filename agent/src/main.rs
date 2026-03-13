@@ -7,7 +7,8 @@ mod signal_client;
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{info, error};
+use std::time::Duration;
+use tracing::{info, warn, error};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,8 +29,8 @@ async fn main() -> Result<()> {
     info!("config loaded from '{}'", config_path);
     info!("signal server: {}  room: {}", cfg.signal.url, cfg.signal.room_id);
 
-    // ─── 启动各功能模块 ───────────────────────────────────────────────────────
-    // video 模块输出 H.264 Annex-B NAL 帧（通过 tokio channel）
+    // ─── 启动媒体采集模块（只启动一次，全程运行）───────────────────────────────
+    // video 模块输出 H.264 Annex-B NAL 帧
     let (video_tx, video_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
     let video_cfg = cfg.video.clone();
     tokio::task::spawn_blocking(move || {
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // audio 模块输出 Opus 帧（通过 tokio channel）
+    // audio 模块输出 Opus 帧
     let (audio_tx, audio_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
     if cfg.audio.enabled {
         let audio_cfg = cfg.audio.clone();
@@ -58,52 +59,92 @@ async fn main() -> Result<()> {
         }
     });
 
-    // WebRTC 引擎（发送媒体、接收 DataChannel HID 控制）
-    let (offer_tx, offer_rx) = tokio::sync::oneshot::channel::<String>();
-    let (answer_tx, answer_rx) = tokio::sync::mpsc::channel::<String>(4);
-    let (remote_candidate_tx, remote_candidate_rx) =
-        tokio::sync::mpsc::channel::<String>(64);
-    let (local_candidate_tx, mut local_candidate_rx) =
-        tokio::sync::mpsc::channel::<String>(64);
+    // ─── 信令 + WebRTC 循环（浏览器断开后自动重新等待下一个连接）─────────────────
+    // 使用 Arc 共享 receiver，重建 sender 实现「多路广播」
+    // 简化方案：持有 Arc<Mutex<Receiver>> 会增加复杂度，这里直接重新创建 channel
+    // video/audio channel 只有 sender 端一直存活，receiver 在每轮 WebRTC 中消耗。
+    // 为避免 receiver 被 move 而无法复用，改用 broadcast channel:
+    use tokio::sync::broadcast;
+    let (video_bcast_tx, _) = broadcast::channel::<bytes::Bytes>(32);
+    let (audio_bcast_tx, _) = broadcast::channel::<bytes::Bytes>(64);
 
-    let ice_cfg = cfg.ice.clone();
-    let webrtc_handle = tokio::spawn(async move {
-        if let Err(e) = webrtc::run(
-            ice_cfg,
-            video_rx,
-            audio_rx,
-            hid_tx,
-            offer_tx,
-            answer_rx,
-            remote_candidate_rx,
-            local_candidate_tx,
-        ).await {
-            error!("webrtc module error: {:#}", e);
-        }
-    });
-
-    // 信令客户端（连接信令服务器，交换 SDP+ICE）
-    let sig_cfg = cfg.signal.clone();
-    let signal_handle = tokio::spawn(async move {
-        if let Err(e) = signal_client::run(
-            sig_cfg,
-            offer_rx,
-            answer_tx,
-            remote_candidate_tx,
-            &mut local_candidate_rx,
-        ).await {
-            error!("signal_client module error: {:#}", e);
-        }
-    });
-
-    // 等待主任务结束（正常情况下永久运行）
-    tokio::select! {
-        _ = webrtc_handle  => { error!("WebRTC task exited"); }
-        _ = signal_handle  => { error!("Signal task exited"); }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Ctrl-C received, shutting down");
-        }
+    // 将 mpsc receiver 桥接到 broadcast
+    {
+        let mut vr = video_rx;
+        let vbt = video_bcast_tx.clone();
+        tokio::spawn(async move {
+            while let Some(frame) = vr.recv().await {
+                let _ = vbt.send(frame);
+            }
+        });
+    }
+    {
+        let mut ar = audio_rx;
+        let abt = audio_bcast_tx.clone();
+        tokio::spawn(async move {
+            while let Some(frame) = ar.recv().await {
+                let _ = abt.send(frame);
+            }
+        });
     }
 
-    Ok(())
+    let mut reconnect_delay = Duration::from_secs(3);
+
+    loop {
+        // 每轮为 WebRTC/信令创建新 channel
+        let (offer_tx, offer_rx)  = tokio::sync::oneshot::channel::<String>();
+        let (answer_tx, answer_rx) = tokio::sync::mpsc::channel::<String>(4);
+        let (remote_cand_tx, remote_cand_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let (local_cand_tx, mut local_cand_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+        // 为本轮 WebRTC 订阅视频/音频 broadcast
+        let video_rx_this = video_bcast_tx.subscribe();
+        let audio_rx_this = audio_bcast_tx.subscribe();
+
+        // 克隆 hid_tx，允许多轮 WebRTC 共享同一个 hid 模块
+        let hid_tx_this = hid_tx.clone();
+
+        let ice_cfg = cfg.ice.clone();
+        let webrtc_handle = tokio::spawn(async move {
+            if let Err(e) = webrtc::run(
+                ice_cfg,
+                video_rx_this,
+                audio_rx_this,
+                hid_tx_this,
+                offer_tx,
+                answer_rx,
+                remote_cand_rx,
+                local_cand_tx,
+            ).await {
+                error!("webrtc module error: {:#}", e);
+            }
+        });
+
+        let sig_cfg = cfg.signal.clone();
+        let signal_handle = tokio::spawn(async move {
+            if let Err(e) = signal_client::run(
+                sig_cfg,
+                offer_rx,
+                answer_tx,
+                remote_cand_tx,
+                &mut local_cand_rx,
+            ).await {
+                error!("signal_client module error: {:#}", e);
+            }
+        });
+
+        tokio::select! {
+            _ = webrtc_handle  => { warn!("webrtc session ended, reconnecting in {:?}…", reconnect_delay); }
+            _ = signal_handle  => { warn!("signal session ended, reconnecting in {:?}…", reconnect_delay); }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl-C received, shutting down");
+                return Ok(());
+            }
+        }
+
+        tokio::time::sleep(reconnect_delay).await;
+        // 退避：首次 3s，逐步增加到最多 30s
+        reconnect_delay = (reconnect_delay + Duration::from_secs(2)).min(Duration::from_secs(30));
+        info!("reconnect: starting new session");
+    }
 }
