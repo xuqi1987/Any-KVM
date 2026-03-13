@@ -18,12 +18,15 @@ const TYPE_MOUSE_MOVE:  u8 = 0x02;
 const TYPE_MOUSE_BTN:   u8 = 0x03;
 const TYPE_MOUSE_WHEEL: u8 = 0x04;
 
-pub fn run(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
+pub fn run(cfg: HidConfig, rx: Receiver<Bytes>) -> Result<()> {
     info!("hid: mode={}", cfg.mode);
 
     match cfg.mode.as_str() {
         "gadget"  => run_gadget(cfg, rx),
+        #[cfg(feature = "ch9329")]
         "ch9329"  => run_ch9329(cfg, rx),
+        #[cfg(not(feature = "ch9329"))]
+        "ch9329"  => bail!("ch9329 support not compiled in; rebuild with --features ch9329"),
         other     => bail!("unknown hid mode: '{}'", other),
     }
 }
@@ -97,6 +100,7 @@ fn make_abs_mouse_report(buttons: u8, x: u16, y: u16, wheel: i8) -> [u8; 6] {
 
 // ─── CH9329 串口 HID 模式（回退方案）─────────────────────────────────────────
 
+#[cfg(feature = "ch9329")]
 fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
     use serialport::SerialPort;
 
@@ -137,8 +141,7 @@ fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
 
 // ─── CH9329 协议帧构造 ────────────────────────────────────────────────────────
 // 帧格式: [0x57, 0xAB, addr(0x00), cmd, len, data..., checksum]
-
-fn ch9329_frame(cmd: u8, data: &[u8]) -> Vec<u8> {
+#[cfg(feature = "ch9329")]fn ch9329_frame(cmd: u8, data: &[u8]) -> Vec<u8> {
     let mut frame = vec![0x57u8, 0xAB, 0x00, cmd, data.len() as u8];
     frame.extend_from_slice(data);
     let sum: u32 = frame.iter().map(|&b| b as u32).sum();
@@ -146,12 +149,14 @@ fn ch9329_frame(cmd: u8, data: &[u8]) -> Vec<u8> {
     frame
 }
 
+#[cfg(feature = "ch9329")]
 fn ch9329_keyboard(modifier: u8, keys: &[u8]) -> Vec<u8> {
     // CMD 0x02: HID 键盘
     let data = [modifier, 0x00, keys[0], keys[1], keys[2], keys[3], keys[4], keys[5]];
     ch9329_frame(0x02, &data)
 }
 
+#[cfg(feature = "ch9329")]
 fn ch9329_abs_mouse(buttons: u8, x: u16, y: u16) -> Vec<u8> {
     // CMD 0x04: HID 绝对鼠标
     let data = [

@@ -9,13 +9,12 @@
 
 use crate::config::SignalConfig;
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn};
 use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]

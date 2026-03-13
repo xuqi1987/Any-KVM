@@ -10,7 +10,7 @@ use crate::config::VideoConfig;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use v4l::buffer::Type;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
@@ -95,7 +95,7 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
     let api = openh264::OpenH264API::from_source();
     let enc_cfg = openh264::encoder::EncoderConfig::new()
         .set_bitrate_bps(cfg.bitrate_kbps * 1000)
-        .set_max_frame_rate(cfg.fps as f32)
+        .max_frame_rate(cfg.fps as f32)
         .debug(false);
     let mut encoder = openh264::encoder::Encoder::with_api_config(api, enc_cfg)
         .context("failed to init openh264 encoder")?;
@@ -109,16 +109,12 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
 
         // YUYV → YUV420 planar（openh264 输入格式）
         let yuv = yuyv_to_yuv420(buf, w, h);
-        let src = openh264::formats::YUVBuffer::new(w, h);
-        // SAFETY: 手动填充 YUV 平面（openh264 crate 通过 YUVBuffer::as_ref）
-        fill_yuv_buffer_from_slice(&yuv, &src, w, h);
+        let src = openh264::formats::YUVBuffer::from_vec(yuv, w, h);
 
         let bitstream = encoder.encode(&src).context("openh264 encode error")?;
-        for layer in bitstream.iter_layers() {
-            let nal = Bytes::copy_from_slice(layer.nal_units());
-            if tx.blocking_send(nal).is_err() {
-                return Ok(());
-            }
+        let encoded = Bytes::from(bitstream.to_vec());
+        if !encoded.is_empty() && tx.blocking_send(encoded).is_err() {
+            return Ok(());
         }
     }
 }
@@ -151,17 +147,4 @@ fn yuyv_to_yuv420(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     yuv
 }
 
-fn fill_yuv_buffer_from_slice(
-    yuv: &[u8],
-    buf: &openh264::formats::YUVBuffer,
-    w: usize,
-    h: usize,
-) {
-    // openh264::YUVBuffer 提供 y_mut/u_mut/v_mut
-    let frame = w * h;
-    let (y, rest) = yuv.split_at(frame);
-    let (u, v)    = rest.split_at(frame / 4);
-    buf.y_mut().copy_from_slice(y);
-    buf.u_mut().copy_from_slice(u);
-    buf.v_mut().copy_from_slice(v);
-}
+

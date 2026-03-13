@@ -29,10 +29,10 @@ openh264       = { version = "0.6", features = ["source"] }
 alsa           = "0.9"
 
 # ─── 音频编码（Opus）──────────────────────────────────────────────────────────
-audiopus       = "0.3"
+audiopus       = { version = "0.3.0-rc.0" }
 
-# ─── HID 串口（CH9329 回退）────────────────────────────────────────────────────
-serialport     = "4"
+# ─── HID 串口（CH9329 回退，可选）─────────────────────────────────────────────
+serialport     = { version = "4", optional = true }
 
 # ─── 配置文件 ─────────────────────────────────────────────────────────────────
 toml           = "0.8"
@@ -47,6 +47,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow         = "1"
 bytes          = "1"
 url            = "2"
+urlencoding    = "2"
+
+[features]
+# 启用 CH9329 串口 HID 支持（依赖 libudev，Linux 专用）
+ch9329 = ["serialport"]
 
 [profile.release]
 opt-level  = 3

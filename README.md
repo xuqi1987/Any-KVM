@@ -57,12 +57,79 @@ echo "bash /opt/any-kvm/setup-hid-gadget.sh" >> /etc/rc.local
 
 #### 2.3 编译 Agent（开发机上交叉编译）
 
+**前置：安装 Rust 工具链（仅首次）**
+
+macOS：
 ```bash
-cargo install cross
+# 安装 rustup（通过 Homebrew）
+brew install rustup-init
+
+# 初始化 stable 工具链
+rustup default stable
+
+# 将 rustup bin 加入 PATH（永久生效）
+echo 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Linux：
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+> **注意**：cross 依赖 Docker，编译前确保 Docker Desktop 已启动。
+
+**安装 cross 并编译（macOS 开发机 → 任意 Linux 设备）**
+
+```bash
+# 安装交叉编译工具 cross（仅首次，需要 Docker 运行中）
+cargo install cross --git https://github.com/cross-rs/cross
+```
+
+根据目标设备选择编译命令：
+
+| 目标设备 | 编译命令 |
+|----------|----------|
+| 玩客云 / 树莓派 5（aarch64） | `cross build --target aarch64-unknown-linux-gnu --release` |
+| Ubuntu 22.04 x86_64 | `cross build --target x86_64-unknown-linux-gnu --release` |
+
+```bash
 cd agent
+
+# 玩客云 / 树莓派 5（aarch64）
 cross build --target aarch64-unknown-linux-gnu --release
-scp target/aarch64-unknown-linux-gnu/release/any-kvm-agent root@<onecloud-ip>:/opt/any-kvm/
-scp config.toml.example root@<onecloud-ip>:/opt/any-kvm/config.toml
+scp target/aarch64-unknown-linux-gnu/release/any-kvm-agent root@<device-ip>:/opt/any-kvm/
+
+# Ubuntu 22.04 x86_64（从 macOS 交叉编译）
+cross build --target x86_64-unknown-linux-gnu --release
+scp target/x86_64-unknown-linux-gnu/release/any-kvm-agent user@<device-ip>:/opt/any-kvm/
+
+# 同时拷贝配置文件
+scp config.toml.example root@<device-ip>:/opt/any-kvm/config.toml
+```
+
+**在 Ubuntu 22.04 x86_64 上本机编译（无需 cross）**
+
+如果直接在目标 Ubuntu 机器上编译，安装依赖后用 `cargo` 即可：
+
+```bash
+# 安装系统依赖
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev \
+    libv4l-dev v4l-utils curl
+
+# 安装 Rust（如未安装）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# 编译
+cd any-kvm/agent
+cargo build --release
+
+# 二进制在 target/release/any-kvm-agent
+cp target/release/any-kvm-agent /opt/any-kvm/
+cp config.toml.example /opt/any-kvm/config.toml
 ```
 
 #### 2.4 配置并启动 Agent

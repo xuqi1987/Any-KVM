@@ -1,20 +1,32 @@
-# Cross.toml — 玩客云 (Amlogic S905L, ARMv8 64-bit) 交叉编译配置
-# 用法: cross build --target aarch64-unknown-linux-gnu --release
+# Cross.toml — 多平台交叉编译配置
+#
+# 支持目标：
+#   aarch64-unknown-linux-gnu  — 玩客云 (S905L) / 树莓派 5 (BCM2712)
+#   x86_64-unknown-linux-gnu   — Ubuntu 22.04 x86_64 服务器/PC
+#
+# 用法:
+#   cross build --target aarch64-unknown-linux-gnu --release
+#   cross build --target x86_64-unknown-linux-gnu  --release
 
 [build.env]
-# 允许访问宿主机的以下环境变量（ALSA/OpenH264 pkg-config 路径）
 passthrough = [
     "PKG_CONFIG_PATH",
-    "PKG_CONFIG_SYSROOT_DIR",
-]
+    "PKG_CONFIG_SYSROOT_DIR",    "PKG_CONFIG_LIBDIR",
+    "PKG_CONFIG_ALLOW_CROSS",]
 
+# ── aarch64（玩客云 / 树莓派 5）──────────────────────────────────────────
 [target.aarch64-unknown-linux-gnu]
-# 使用带 ALSA/V4L2/串口头文件的 cross 镜像
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
-
-# 挂载宿主 /dev/null 防止 openssl 探测本机设备
 pre-build = [
     "dpkg --add-architecture arm64",
     "apt-get update -qq",
-    "apt-get install -y --no-install-recommends libasound2-dev:arm64 libssl-dev:arm64",
+    "apt-get install -y --no-install-recommends libasound2-dev:arm64 libssl-dev:arm64 libudev-dev:arm64",
+]
+
+# ── x86_64（Ubuntu 22.04 PC / 服务器）──────────────────────────────────────────
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+pre-build = [
+    "apt-get update -qq",
+    "apt-get install -y --no-install-recommends libasound2-dev libssl-dev libudev-dev",
 ]
