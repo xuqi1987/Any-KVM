@@ -38,19 +38,74 @@ jobs:
           echo "  Any-KVM 自动部署"
           echo "=========================================="
 
-          # 安装 Docker
-          echo "→ 安装依赖..."
+          # 安装/校验 Docker（更健壮）
+          echo "→ 检查 Docker..."
           if ! command -v docker &> /dev/null; then
+              echo "→ 安装 Docker（非交互模式）..."
               export DEBIAN_FRONTEND=noninteractive
+
+              # 更新 apt 源
               apt-get update -qq
-              apt-get install -y docker.io docker-compose curl git wget
-              systemctl enable --now docker
-              echo "✓ Docker 已安装"
+
+              # 分步骤安装 docker 相关包，添加 dpkg 选项以减少交互提示
+              apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+                  docker.io curl git wget || {
+                  echo "⚠ apt 安装 docker.io 失败，尝试使用官方安装脚本..." >&2
+                  # 回退到官方安装脚本（更可靠）
+                  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+                  sh /tmp/get-docker.sh
+                  rm -f /tmp/get-docker.sh
+              }
+
+              # 确保 Docker 服务已启动（允许重试）
+              for i in 1 2 3; do
+                  systemctl start docker && break || {
+                      echo "尝试启动 docker (#$i)..." >&2
+                      sleep 2
+                  }
+              done
+
+              # 校验 docker 可用性
+              if ! docker version &> /dev/null; then
+                  echo "Error: Docker 安装或启动失败" >&2
+                  # 打印最近日志供排错
+                  journalctl -u docker -n 50 --no-pager || true
+                  exit 1
+              fi
+
+              echo "✓ Docker 已安装并正在运行"
+
+              # 安装 docker-compose（优先 apt，若无则下载二进制）
+              if ! command -v docker-compose &> /dev/null; then
+                  echo "→ 安装 docker-compose..."
+                  if apt-get install -y docker-compose; then
+                      echo "✓ docker-compose 已通过 apt 安装"
+                  else
+                      # 使用 GitHub Releases 下载 docker-compose v2.x 二进制到 /usr/local/bin
+                      COMPOSE_VERSION="2.24.0"
+                      curl -fsSL -o /usr/local/bin/docker-compose \
+                        "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)"
+                      chmod +x /usr/local/bin/docker-compose || true
+                      echo "✓ docker-compose 已下载到 /usr/local/bin/docker-compose"
+                  fi
+              fi
           else
               echo "✓ Docker 已存在"
+              # 若 Docker 未运行则尝试启动
+              if ! systemctl is-active --quiet docker; then
+                  echo "→ 启动 Docker 服务..."
+                  systemctl start docker || true
+                  sleep 2
+              fi
+              # 校验 docker 可用性
+              if ! docker version &> /dev/null; then
+                  echo "Error: Docker 已存在但不可用" >&2
+                  journalctl -u docker -n 50 --no-pager || true
+                  exit 1
+              fi
           fi
 
-          # 克隆/更新项目
+          # 以下为原有流程：克隆/更新项目、替换配置、启动容器等
           echo ""
           echo "→ 更新代码..."
           cd /root
@@ -58,7 +113,6 @@ jobs:
               cd Any-KVM && git pull && cd /root
               echo "✓ 代码已更新"
           else
-              # 添加重试机制
               MAX_RETRIES=3
               RETRY_DELAY=5
               CLONE_TIMEOUT=300
@@ -84,7 +138,6 @@ jobs:
               fi
           fi
 
-          # 配置
           echo ""
           echo "→ 配置服务..."
           cd /root/Any-KVM/deploy
@@ -95,19 +148,16 @@ jobs:
           fi
           TURN_PASSWORD=$(openssl rand -base64 24 | tr -d "=+/" | cut -c1-20)
 
-          # 备份原配置
           if [ -f coturn.conf ]; then
               cp coturn.conf coturn.conf.bak
               echo "✓ 已备份 coturn.conf"
           fi
 
-          # 更新配置
           sed -i "s/YOUR_PUBLIC_IP/$PUBLIC_IP/g" coturn.conf
           sed -i "s/CHANGE_ME_IN_PRODUCTION/$TURN_PASSWORD/g" coturn.conf
 
           echo "✓ 配置完成"
 
-          # 启动服务
           echo ""
           echo "→ 启动容器..."
           docker-compose down 2>/dev/null || true
@@ -115,7 +165,6 @@ jobs:
 
           sleep 10
 
-          # 生成配置文档
           cat > /root/any-kvm-info.txt << EOF
           ╔══════════════════════════════════════════════════════╗
           ║           Any-KVM 部署成功！                          ║
@@ -164,15 +213,8 @@ jobs:
           cat /root/any-kvm-info.txt
 
           echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo " 📊 服务状态"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           docker-compose ps
 
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo " 🔍 健康检查"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           if curl -s --max-time 5 http://localhost:8080/health | grep -q "ok"; then
               echo "✓ 信令服务器运行正常"
           else
