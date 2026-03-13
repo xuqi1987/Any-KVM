@@ -43,3 +43,13 @@
 
 # debug information files
 *.dwo
+
+# Any-KVM build artifacts
+agent/target/
+dist/
+
+# Deploy test credentials (包含明文密码，不纳入版本控制)
+.github/skills/deploy-test/scripts/env.sh
+
+# IDE workspace files
+scripts/Any-KVM.code-workspace
