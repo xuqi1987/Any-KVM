@@ -4,8 +4,8 @@ services:
   # ─── 信令服务器 ─────────────────────────────────────────────────────────────
   signal:
     build:
-      context: .
-      dockerfile: Dockerfile.signal
+      context: ..
+      dockerfile: deploy/Dockerfile.signal
     container_name: any-kvm-signal
     restart: unless-stopped
     ports:
