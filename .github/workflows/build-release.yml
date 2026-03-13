@@ -1,0 +1,159 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Rust Agent 交叉编译 ────────────────────────────────────────────────────
+  build-agent:
+    name: Build Agent (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            artifact: any-kvm-agent-aarch64-linux
+          - target: x86_64-unknown-linux-gnu
+            artifact: any-kvm-agent-x86_64-linux
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Cargo 注册表
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('agent/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: 安装 cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: 交叉编译 Agent
+        working-directory: agent
+        run: cross build --target ${{ matrix.target }} --release
+
+      - name: 准备产物
+        run: |
+          cp agent/target/${{ matrix.target }}/release/any-kvm-agent ${{ matrix.artifact }}
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 7
+
+  # ── Go Signal Server 编译 ─────────────────────────────────────────────────
+  build-signal:
+    name: Build Signal Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: signal/go.sum
+
+      - name: 编译 Signal Server
+        working-directory: signal
+        run: go build -o signal-server -ldflags="-s -w" .
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-server-x86_64-linux
+          path: signal/signal-server
+          retention-days: 7
+
+  # ── 创建 GitHub Release ───────────────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: [build-agent, build-signal]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: 确定 Release 标签
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 列出产物
+        run: find artifacts/ -type f -ls
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Any-KVM ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Any-KVM ${{ steps.tag.outputs.tag }}
+
+            ### 📦 Release 包说明
+
+            | 文件 | 说明 | 适用设备 |
+            |------|------|----------|
+            | `any-kvm-agent-aarch64-linux` | 设备端 Agent（ARM64） | 玩客云、树莓派 5 等 |
+            | `any-kvm-agent-x86_64-linux` | 设备端 Agent（x86_64） | Ubuntu x86_64 PC/服务器 |
+            | `signal-server-x86_64-linux` | 信令服务器（x86_64） | Linux 服务器 |
+
+            ### 🚀 快速部署信令服务器
+
+            ```bash
+            # 参考 deploy/ 目录使用 Docker Compose 一键部署
+            cd deploy && docker-compose up -d
+            ```
+
+            ### 📱 设备端安装
+
+            ```bash
+            # ARM64 设备（玩客云 / 树莓派 5）
+            chmod +x any-kvm-agent-aarch64-linux
+            ./any-kvm-agent-aarch64-linux --config /opt/any-kvm/config.toml
+
+            # x86_64 设备
+            chmod +x any-kvm-agent-x86_64-linux
+            ./any-kvm-agent-x86_64-linux --config /opt/any-kvm/config.toml
+            ```
+          files: |
+            artifacts/any-kvm-agent-aarch64-linux/any-kvm-agent-aarch64-linux
+            artifacts/any-kvm-agent-x86_64-linux/any-kvm-agent-x86_64-linux
+            artifacts/signal-server-x86_64-linux/signal-server
