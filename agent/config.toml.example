@@ -8,7 +8,11 @@ url     = "ws://your-server:8080/ws"
 room_id = "kvm-room-1"
 
 [video]
-# V4L2 视频设备节点
+# 视频源类型："v4l2"（USB 采集卡/摄像头，默认）或 "screen"（本机屏幕截图）
+# 使用 screen 时需启用 screen-capture feature 编译：
+#   cargo build --release --features screen-capture
+source       = "v4l2"
+# V4L2 视频设备节点（source="v4l2" 时生效）
 device       = "/dev/video0"
 # 分辨率
 width        = 1280

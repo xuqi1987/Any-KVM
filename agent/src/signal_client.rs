@@ -38,9 +38,10 @@ pub async fn run(
     let mut backoff = Duration::from_secs(1);
     loop {
         let url = format!(
-            "{}?room={}&role=device",
+            "{}?room={}&role=device&name={}",
             cfg.url,
-            urlencoding::encode(&cfg.room_id)
+            urlencoding::encode(&cfg.room_id),
+            urlencoding::encode(&cfg.room_id),
         );
         info!("signal: connecting to {}", url);
 

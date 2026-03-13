@@ -61,6 +61,60 @@ jobs:
 
       - name: 准备产物
         run: |
+          mkdir -p pkg/any-kvm-agent/bin pkg/any-kvm-agent/etc pkg/any-kvm-agent/systemd
+          cp agent/target/${{ matrix.target }}/release/any-kvm-agent pkg/any-kvm-agent/bin/
+          cp agent/config.toml.example pkg/any-kvm-agent/etc/config.toml.example
+          cp agent/config.toml.example pkg/any-kvm-agent/etc/config.toml
+          cp scripts/any-kvm-agent.service pkg/any-kvm-agent/systemd/ 2>/dev/null || true
+
+          # 生成 install.sh
+          cat > pkg/any-kvm-agent/install.sh << 'INSTALL_EOF'
+          #!/bin/bash
+          set -e
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          echo "[INFO] 安装 any-kvm-agent…"
+          sudo install -m 755 "$SCRIPT_DIR/bin/any-kvm-agent" /usr/local/bin/any-kvm-agent
+          sudo mkdir -p /etc/any-kvm-agent
+          if [ ! -f /etc/any-kvm-agent/config.toml ]; then
+              sudo cp "$SCRIPT_DIR/etc/config.toml" /etc/any-kvm-agent/config.toml
+              echo "[OK] 配置文件已写入 /etc/any-kvm-agent/config.toml"
+          else
+              echo "[INFO] 配置文件已存在，保留不覆盖"
+              sudo cp "$SCRIPT_DIR/etc/config.toml" /etc/any-kvm-agent/config.toml.new
+          fi
+          sudo cp "$SCRIPT_DIR/etc/config.toml.example" /etc/any-kvm-agent/config.toml.example
+          if command -v systemctl &>/dev/null; then
+              sudo cp "$SCRIPT_DIR/systemd/any-kvm-agent.service" /etc/systemd/system/
+              sudo systemctl daemon-reload
+              sudo systemctl enable any-kvm-agent
+              echo "[OK] 服务已安装，请先编辑 /etc/any-kvm-agent/config.toml 后执行：sudo systemctl start any-kvm-agent"
+          fi
+          INSTALL_EOF
+          chmod +x pkg/any-kvm-agent/install.sh
+
+          # 如果 systemd service 文件不存在则生成一个
+          if [ ! -f pkg/any-kvm-agent/systemd/any-kvm-agent.service ]; then
+            cat > pkg/any-kvm-agent/systemd/any-kvm-agent.service << 'SVC_EOF'
+          [Unit]
+          Description=Any-KVM Device Agent
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/usr/local/bin/any-kvm-agent /etc/any-kvm-agent/config.toml
+          Restart=on-failure
+          RestartSec=5s
+          SupplementaryGroups=video audio input
+          [Install]
+          WantedBy=multi-user.target
+          SVC_EOF
+          fi
+
+          # 打包 tar.gz
+          ARCH_LABEL=$(echo "${{ matrix.target }}" | cut -d- -f1)
+          tar -czf any-kvm-agent-${ARCH_LABEL}-linux.tar.gz -C pkg any-kvm-agent
+          # 同时保留单独的二进制文件
           cp agent/target/${{ matrix.target }}/release/any-kvm-agent ${{ matrix.artifact }}
 
       - name: 上传构建产物
@@ -68,6 +122,13 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+          retention-days: 7
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-tar
+          path: any-kvm-agent-*-linux.tar.gz
           retention-days: 7
 
   # ── Go Signal Server 编译 ─────────────────────────────────────────────────
@@ -138,8 +199,10 @@ jobs:
 
             | 文件 | 说明 | 适用设备 |
             |------|------|----------|
-            | `any-kvm-agent-aarch64-linux` | 设备端 Agent（ARM64） | 玩客云、树莓派 5 等 |
-            | `any-kvm-agent-x86_64-linux` | 设备端 Agent（x86_64） | Ubuntu x86_64 PC/服务器 |
+            | `any-kvm-agent-aarch64-linux.tar.gz` | Agent 安装包（ARM64） | 玩客云、树莓派 5 等 |
+            | `any-kvm-agent-x86_64-linux.tar.gz` | Agent 安装包（x86_64） | Ubuntu x86_64 PC/服务器 |
+            | `any-kvm-agent-aarch64-linux` | Agent 单独二进制（ARM64） | 手动部署 |
+            | `any-kvm-agent-x86_64-linux` | Agent 单独二进制（x86_64） | 手动部署 |
             | `signal-server-x86_64-linux` | 信令服务器（x86_64） | Linux 服务器 |
 
             ### 🚀 快速部署信令服务器
@@ -149,18 +212,21 @@ jobs:
             cd deploy && docker-compose up -d
             ```
 
-            ### 📱 设备端安装
+            ### 📱 设备端安装（推荐）
 
             ```bash
-            # ARM64 设备（玩客云 / 树莓派 5）
-            chmod +x any-kvm-agent-aarch64-linux
-            ./any-kvm-agent-aarch64-linux --config /opt/any-kvm/config.toml
-
-            # x86_64 设备
-            chmod +x any-kvm-agent-x86_64-linux
-            ./any-kvm-agent-x86_64-linux --config /opt/any-kvm/config.toml
+            # 下载并解压安装包（以 ARM64 为例）
+            tar xzf any-kvm-agent-aarch64-linux.tar.gz
+            # 编辑配置文件（至少修改信令服务器地址和房间 ID）
+            nano any-kvm-agent/etc/config.toml
+            # 一键安装（含 systemd 服务注册）
+            sudo ./any-kvm-agent/install.sh
+            # 启动服务
+            sudo systemctl start any-kvm-agent
             ```
           files: |
             artifacts/any-kvm-agent-aarch64-linux/any-kvm-agent-aarch64-linux
             artifacts/any-kvm-agent-x86_64-linux/any-kvm-agent-x86_64-linux
+            artifacts/any-kvm-agent-aarch64-linux-tar/*.tar.gz
+            artifacts/any-kvm-agent-x86_64-linux-tar/*.tar.gz
             artifacts/signal-server-x86_64-linux/signal-server

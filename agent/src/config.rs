@@ -18,6 +18,9 @@ pub struct SignalConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct VideoConfig {
+    /// 视频源类型："v4l2"（USB 采集卡/摄像头）或 "screen"（本机屏幕）
+    #[serde(default = "default_video_source")]
+    pub source:       String,
     pub device:       PathBuf,
     pub width:        u32,
     pub height:       u32,
@@ -25,6 +28,8 @@ pub struct VideoConfig {
     pub bitrate_kbps: u32,
     pub hw_encode:    bool,
 }
+
+fn default_video_source() -> String { "v4l2".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AudioConfig {

@@ -10,6 +10,7 @@
 use crate::config::IceConfig;
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use str0m::change::SdpAnswer;
 use str0m::media::{Direction, Frequency, MediaTime, Mid};
@@ -17,7 +18,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::net::UdpSocket;
-use tracing::info;
+use tracing::{info, warn};
 
 pub async fn run(
     ice_cfg:              IceConfig,
@@ -33,18 +34,32 @@ pub async fn run(
 
     // ─── 绑定 UDP socket（ICE 使用）─────────────────────────────────────────
     let socket = UdpSocket::bind("0.0.0.0:0").await.context("UDP bind")?;
-    let local_addr = socket.local_addr()?;
-    info!("webrtc: UDP socket bound on {}", local_addr);
+    let socket_addr = socket.local_addr()?;
+    let local_port = socket_addr.port();
+    info!("webrtc: UDP socket bound on port {}", local_port);
 
     // ─── 构建 str0m Rtc 实例 ─────────────────────────────────────────────────
-    // str0m 0.5.x 不通过 builder 配置 ICE 服务器；STUN/TURN 配置预留给后续扩展
     let _ = &ice_cfg; // ice_cfg 字段预留
     let mut rtc = Rtc::builder().build();
 
-    // 注册本地 host candidate（ICE 使用的 UDP socket 地址）
-    rtc.add_local_candidate(
-        Candidate::host(local_addr, Protocol::Udp).context("host candidate")?,
-    );
+    // 枚举本机真实网络接口 IP，注册为 ICE host candidate
+    // 0.0.0.0 不是合法 candidate，需要逐个注册真实 IP
+    let local_ips = get_local_ips();
+    if local_ips.is_empty() {
+        warn!("webrtc: no usable network interfaces found, using 127.0.0.1");
+        let addr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), local_port);
+        rtc.add_local_candidate(
+            Candidate::host(addr, Protocol::Udp).context("host candidate")?,
+        );
+    } else {
+        for ip in &local_ips {
+            let addr = SocketAddr::new(*ip, local_port);
+            info!("webrtc: registering local candidate {}", addr);
+            rtc.add_local_candidate(
+                Candidate::host(addr, Protocol::Udp).context("host candidate")?,
+            );
+        }
+    }
 
     // ─── 生成 SDP offer（video + audio + DataChannel）────────────────────────
     let (offer_sdp, pending, video_mid, audio_mid) = build_full_offer(&mut rtc)?;
@@ -111,7 +126,7 @@ pub async fn run(
             }
             result = socket.recv_from(&mut buf) => {
                 if let Ok((n, from)) = result {
-                    if let Ok(recv) = Receive::new(Protocol::Udp, from, local_addr, &buf[..n]) {
+                    if let Ok(recv) = Receive::new(Protocol::Udp, from, socket_addr, &buf[..n]) {
                         rtc.handle_input(Input::Receive(Instant::now(), recv))?;
                     }
                 }
@@ -158,4 +173,45 @@ async fn handle_event(event: Event, hid_tx: &Sender<Bytes>) {
         }
         _ => {}
     }
+}
+
+/// 枚举本机可用的非回环、非 link-local 的网络接口 IP 地址
+fn get_local_ips() -> Vec<IpAddr> {
+    use std::net::{Ipv4Addr, UdpSocket as StdUdp};
+
+    let mut ips = Vec::new();
+
+    // 方法 1：通过连接外部地址让 OS 选择最佳出口 IP
+    if let Ok(sock) = StdUdp::bind("0.0.0.0:0") {
+        // connect 不会真的发包，只是让 OS 填充本地地址
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = sock.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+
+    // 方法 2：解析 /proc/net/fib_trie（Linux 特有）
+    // 格式：先出现 "|-- <IP>"，下一行如果是 "/32 host LOCAL" 则该 IP 是本机地址
+    if let Ok(content) = std::fs::read_to_string("/proc/net/fib_trie") {
+        let mut last_ip: Option<Ipv4Addr> = None;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(ip_str) = trimmed.strip_prefix("|-- ") {
+                last_ip = ip_str.parse::<Ipv4Addr>().ok();
+            } else if trimmed.starts_with("/32 host LOCAL") {
+                if let Some(ip) = last_ip.take() {
+                    let ip = IpAddr::V4(ip);
+                    if !ip.is_loopback() && !ip.is_unspecified() && !ips.contains(&ip) {
+                        ips.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    ips
 }

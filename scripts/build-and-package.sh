@@ -175,12 +175,14 @@ EOF
 info "检查系统依赖…"
 
 MISSING_PKGS=()
-for pkg in pkg-config libasound2-dev libssl-dev build-essential; do
+for pkg in pkg-config libasound2-dev libssl-dev libv4l-dev libclang-dev build-essential; do
     if ! dpkg -s "$pkg" &>/dev/null 2>&1; then
         case "$pkg" in
             pkg-config)      command -v pkg-config &>/dev/null || MISSING_PKGS+=("$pkg") ;;
             libasound2-dev)  pkg-config --exists alsa 2>/dev/null || MISSING_PKGS+=("$pkg") ;;
             libssl-dev)      pkg-config --exists openssl 2>/dev/null || MISSING_PKGS+=("$pkg") ;;
+            libv4l-dev)      [ -f /usr/include/linux/videodev2.h ] || MISSING_PKGS+=("$pkg") ;;
+            libclang-dev)    ldconfig -p 2>/dev/null | grep -q libclang || MISSING_PKGS+=("$pkg") ;;
             build-essential) command -v gcc &>/dev/null || MISSING_PKGS+=("gcc / build-essential") ;;
         esac
     fi
@@ -192,16 +194,16 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
         info "检测到 Debian/Ubuntu，尝试自动安装…"
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libssl-dev build-essential dpkg-dev
+            pkg-config libasound2-dev libssl-dev libv4l-dev libclang-dev build-essential dpkg-dev
         ok "系统依赖安装完成"
     elif command -v dnf &>/dev/null; then
-        sudo dnf install -y pkgconf alsa-lib-devel openssl-devel gcc
+        sudo dnf install -y pkgconf alsa-lib-devel openssl-devel v4l-utils-devel clang-devel gcc
         ok "系统依赖安装完成"
     elif command -v pacman &>/dev/null; then
-        sudo pacman -S --noconfirm pkgconf alsa-lib openssl base-devel
+        sudo pacman -S --noconfirm pkgconf alsa-lib openssl v4l-utils clang base-devel
         ok "系统依赖安装完成"
     else
-        die "请手动安装：pkg-config libasound2-dev(或同等包) libssl-dev gcc"
+        die "请手动安装：pkg-config libasound2-dev(或同等包) libssl-dev libv4l-dev libclang-dev gcc"
     fi
 else
     ok "系统依赖已就绪"
