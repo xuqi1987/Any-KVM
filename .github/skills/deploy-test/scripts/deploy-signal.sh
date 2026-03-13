@@ -7,32 +7,33 @@ source "${SCRIPT_DIR}/env.sh"
 REMOTE_REPO="/opt/any-kvm"
 
 echo "==> [1/4] 检查远端依赖（git、docker）"
-ssh_remote "command -v git docker >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git docker.io docker-compose-plugin)"
+ssh_remote "command -v git docker >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git docker.io)"
 
 echo "==> [2/4] 同步仓库到远端 ${REMOTE_REPO}"
-ssh_remote "
-  if [ -d '${REMOTE_REPO}/.git' ]; then
-    cd ${REMOTE_REPO} && git fetch origin && git reset --hard origin/main
-  else
-    git clone https://github.com/$(git -C '${REPO_ROOT}' remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||' || echo 'your-org/Any-KVM') ${REMOTE_REPO} 2>/dev/null \
-      || { mkdir -p ${REMOTE_REPO}; echo 'clone skipped, using rsync'; }
-  fi
-"
+ssh_remote "mkdir -p ${REMOTE_REPO}/signal ${REMOTE_REPO}/web ${REMOTE_REPO}/deploy"
 
-# 若 git clone 不可用则用 rsync 同步关键目录
-echo "==> [2b/4] rsync 同步 signal/ web/ deploy/ 到远端"
+# 分目录 rsync，保留目录结构
 sshpass -p "${REMOTE_PASS}" rsync -az --delete \
   -e "ssh -o StrictHostKeyChecking=no" \
   "${REPO_ROOT}/signal/" \
-  "${REPO_ROOT}/web/" \
-  "${REPO_ROOT}/deploy/" \
-  "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_REPO}/" 2>/dev/null || true
+  "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_REPO}/signal/"
 
-echo "==> [3/4] 远端 docker compose 构建并启动"
+sshpass -p "${REMOTE_PASS}" rsync -az --delete \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  "${REPO_ROOT}/web/" \
+  "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_REPO}/web/"
+
+sshpass -p "${REMOTE_PASS}" rsync -az --delete \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  "${REPO_ROOT}/deploy/" \
+  "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_REPO}/deploy/"
+
+echo "==> [3/4] 远端 docker-compose 构建并启动"
 ssh_remote "
   cd ${REMOTE_REPO}
-  docker compose -f deploy/docker-compose.yml down --remove-orphans 2>/dev/null || true
-  docker compose -f deploy/docker-compose.yml up -d --build
+  docker rm -f any-kvm-signal any-kvm-coturn 2>/dev/null || true
+  docker-compose -f deploy/docker-compose.yml down --remove-orphans 2>/dev/null || true
+  docker-compose -f deploy/docker-compose.yml up -d --build
 "
 
 echo "==> [4/4] 等待服务就绪"
