@@ -22,8 +22,13 @@ jobs:
       - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: 安装 sshpass
-        run: DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y sshpass
+      - name: 检查 sshpass 是否已安装
+        run: |
+          if ! command -v sshpass &> /dev/null; then
+            echo "Error: sshpass 未安装，请在 self-hosted runner 上预先安装 sshpass 后再运行此工作流。" >&2
+            exit 1
+          fi
+          echo "✓ sshpass 已安装：$(sshpass -V 2>&1 | head -1)"
 
       - name: 部署服务
         env:
