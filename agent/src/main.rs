@@ -31,11 +31,24 @@ async fn main() -> Result<()> {
 
     // ─── 启动媒体采集模块（只启动一次，全程运行）───────────────────────────────
     // video 模块输出 H.264 Annex-B NAL 帧
+    // 如果配置的源（默认 v4l2）失败，自动回退到屏幕截图
     let (video_tx, video_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
     let video_cfg = cfg.video.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = video::run(video_cfg, video_tx) {
-            error!("video module error: {:#}", e);
+        match video::run(video_cfg.clone(), video_tx.clone()) {
+            Ok(()) => {}
+            Err(e) => {
+                error!("video module error: {:#}", e);
+                // 自动回退到屏幕截图
+                if video_cfg.source != "screen" {
+                    warn!("video: falling back to screen capture");
+                    let mut screen_cfg = video_cfg;
+                    screen_cfg.source = "screen".to_string();
+                    if let Err(e2) = video::run(screen_cfg, video_tx) {
+                        error!("screen capture fallback also failed: {:#}", e2);
+                    }
+                }
+            }
         }
     });
 

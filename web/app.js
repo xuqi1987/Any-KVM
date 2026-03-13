@@ -20,6 +20,8 @@ const App = (() => {
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun.cloudflare.com:3478' },
         { urls: 'stun:stun.miwifi.com:3478' },      // 小米，国内友好
+        { urls: 'stun:47.86.7.158:3478' },            // 自建 coturn STUN
+        { urls: 'turn:47.86.7.158:3478', username: 'kvmuser', credential: 'anykvm2026' },
     ];
 
     // 默认信令服务器（填写你的公网服务器地址，用户可在界面修改并自动记忆）
@@ -375,6 +377,8 @@ const App = (() => {
             sbIce.textContent = `ICE: ${s}`;
 
             if (s === 'connected' || s === 'completed') {
+                // ICE 已连通，更新 overlay 状态（即使视频尚未到达）
+                overlayMsg.textContent = '连接成功，等待视频流…';
                 // 检测是否走 TURN 中继
                 pc.getStats().then(stats => {
                     stats.forEach(r => {
@@ -391,8 +395,10 @@ const App = (() => {
                 startStatsLoop();
             } else if (s === 'failed') {
                 setBadge('failed', '❌ 连接失败');
+                overlayMsg.textContent = 'ICE 连接失败，请检查网络或 TURN 配置';
             } else if (s === 'disconnected') {
                 setBadge('connecting', '⚠ 断开，重连中…');
+                overlayMsg.textContent = '连接断开，等待恢复…';
             }
         };
 
@@ -414,31 +420,40 @@ const App = (() => {
 
     function connectSignal(signalUrl, roomId) {
         const url = `${signalUrl}?room=${encodeURIComponent(roomId)}&role=client`;
+        console.log('connectSignal: opening', url);
+        overlayMsg.textContent = `正在连接 ${url} …`;
         ws = new WebSocket(url);
 
         ws.onopen = () => {
             console.log('signal connected');
             setBadge('connecting', '⏳ 等待设备…');
-            overlayMsg.textContent = '已连接信令，等待设备端…';
+            overlayMsg.textContent = '已连接信令，等待设备 offer…';
         };
 
         ws.onmessage = async ({ data }) => {
             let msg;
             try { msg = JSON.parse(data); } catch { return; }
+            console.log('signal msg:', msg.type);
 
             if (msg.type === 'offer') {
-                // 收到设备端 offer
-                createPeerConnection();
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                wsSend({ type: 'answer', payload: answer });
-                overlayMsg.textContent = '协商中…';
+                try {
+                    overlayMsg.textContent = '收到 offer，创建 WebRTC…';
+                    createPeerConnection();
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+                    overlayMsg.textContent = '生成 answer…';
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    wsSend({ type: 'answer', payload: answer });
+                    overlayMsg.textContent = 'ICE 协商中…';
 
-                // 创建 HID DataChannel（客户端发起）
-                dc = pc.createDataChannel('hid-control', { ordered: false, maxRetransmits: 0 });
-                dc.onopen = () => console.log('DataChannel open');
-                dc.onclose = () => console.log('DataChannel closed');
+                    // 创建 HID DataChannel（客户端发起）
+                    dc = pc.createDataChannel('hid-control', { ordered: false, maxRetransmits: 0 });
+                    dc.onopen = () => console.log('DataChannel open');
+                    dc.onclose = () => console.log('DataChannel closed');
+                } catch (e) {
+                    console.error('offer handling error:', e);
+                    overlayMsg.textContent = `WebRTC 错误: ${e.message}`;
+                }
 
             } else if (msg.type === 'candidate') {
                 if (pc) {
@@ -450,11 +465,15 @@ const App = (() => {
 
         ws.onerror = (e) => {
             console.error('signal error:', e);
+            overlayMsg.textContent = '信令 WebSocket 连接失败';
             setError('信令连接错误，请检查服务器地址');
         };
 
-        ws.onclose = () => {
-            console.log('signal closed');
+        ws.onclose = (e) => {
+            console.log('signal closed, code:', e.code, 'reason:', e.reason);
+            if (overlayMsg.textContent.includes('正在连接')) {
+                overlayMsg.textContent = `信令连接关闭 (code=${e.code})`;
+            }
         };
     }
 

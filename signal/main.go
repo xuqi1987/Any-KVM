@@ -40,6 +40,7 @@ type room struct {
 	client      *peer
 	deviceName  string
 	connectedAt time.Time
+	offerCache  []byte // 缓存设备最近一次 offer，客户端连接时自动回放
 }
 
 func (r *room) set(role string, p *peer) {
@@ -57,14 +58,26 @@ func (r *room) clear(role string) {
 	defer r.mu.Unlock()
 	if role == "device" {
 		r.device = nil
+		r.offerCache = nil // 设备断开，清除缓存的 offer
 	} else {
 		r.client = nil
 	}
 }
 
 // forward 把消息转发给对端（非阻塞，满缓冲区丢弃并记录日志）。
+// 设备端的 offer 会被缓存，客户端稍后连接时自动回放。
 func (r *room) forward(fromRole string, msg []byte) {
 	r.mu.Lock()
+
+	// 缓存设备端 offer，以便客户端稍后连接时能收到
+	if fromRole == "device" {
+		var m SignalMsg
+		if json.Unmarshal(msg, &m) == nil && m.Type == "offer" {
+			r.offerCache = make([]byte, len(msg))
+			copy(r.offerCache, msg)
+		}
+	}
+
 	var target *peer
 	if fromRole == "device" {
 		target = r.client
@@ -200,6 +213,21 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("room[%s] %s connected (%s)", roomID, role, r.RemoteAddr)
 
 	go writePump(p)
+
+	// 客户端连接时，若设备已发送过 offer，立即回放
+	if role == "client" {
+		rm.mu.Lock()
+		cached := rm.offerCache
+		rm.mu.Unlock()
+		if cached != nil {
+			select {
+			case p.send <- cached:
+				log.Printf("room[%s] replayed cached offer to client", roomID)
+			default:
+				log.Printf("[warn] room[%s] failed to replay offer (buffer full)", roomID)
+			}
+		}
+	}
 
 	conn.SetReadLimit(maxMessageSize)
 	conn.SetReadDeadline(time.Now().Add(pongWait))

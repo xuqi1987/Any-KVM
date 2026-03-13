@@ -6,7 +6,10 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/any-kvm-agent /etc/any-kvm-agent/config.toml
+Environment=DISPLAY=:99
+ExecStartPre=-/usr/bin/pkill -f "Xvfb :99"
+ExecStart=/usr/bin/any-kvm-agent-wrapper
+ExecStopPost=-/usr/bin/pkill -f "Xvfb :99"
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal

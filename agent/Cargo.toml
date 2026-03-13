@@ -52,12 +52,12 @@ url            = "2"
 urlencoding    = "2"
 
 [features]
-default = ["v4l2-capture"]
+default = ["v4l2-capture", "screen-capture"]
 # 启用 V4L2 视频采集（依赖 libv4l-dev 系统头文件）
 v4l2-capture = ["v4l"]
 # 启用 CH9329 串口 HID 支持（依赖 libudev，Linux 专用）
 ch9329 = ["serialport"]
-# 启用屏幕截图视频源（依赖 libxcb，需 X11 环境；ARM 设备建议不启用）
+# 启用屏幕截图视频源（依赖 libxcb，需 X11 环境；ARM 嵌入式且无显示器时可不启用）
 screen-capture = ["scrap"]
 
 [profile.release]

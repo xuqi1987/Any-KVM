@@ -45,7 +45,9 @@ pub struct HidConfig {
     pub mode:            String,  // "gadget" | "ch9329"
     pub keyboard_device: PathBuf,
     pub mouse_device:    PathBuf,
+    #[allow(dead_code)]   // 仅 ch9329 feature 启用时使用
     pub serial_port:     String,
+    #[allow(dead_code)]   // 仅 ch9329 feature 启用时使用
     pub serial_baud:     u32,
 }
 
