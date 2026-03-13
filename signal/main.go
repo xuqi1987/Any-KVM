@@ -35,9 +35,11 @@ func newPeer(conn *websocket.Conn) *peer {
 
 // room 表示一个 KVM 会话，最多一个设备 + 一个客户端。
 type room struct {
-	mu     sync.Mutex
-	device *peer
-	client *peer
+	mu          sync.Mutex
+	device      *peer
+	client      *peer
+	deviceName  string
+	connectedAt time.Time
 }
 
 func (r *room) set(role string, p *peer) {
@@ -185,6 +187,16 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	p := newPeer(conn)
 	rm := getOrCreate(roomID)
 	rm.set(role, p)
+	if role == "device" {
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			name = roomID
+		}
+		rm.mu.Lock()
+		rm.deviceName = name
+		rm.connectedAt = time.Now()
+		rm.mu.Unlock()
+	}
 	log.Printf("room[%s] %s connected (%s)", roomID, role, r.RemoteAddr)
 
 	go writePump(p)
@@ -236,6 +248,45 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "rooms": n})
 }
 
+// ─── Agent 列表接口：返回当前有设备在线的 room 列表 ────────────────────────────
+
+type AgentInfo struct {
+	RoomID      string `json:"room_id"`
+	Name        string `json:"name"`
+	ConnectedAt string `json:"connected_at"`
+}
+
+func agentsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// 允许 Web 页面跨域查询（仅 GET，只读接口）
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	roomsMu.Lock()
+	agents := make([]AgentInfo, 0, len(rooms))
+	for id, rm := range rooms {
+		rm.mu.Lock()
+		hasDevice := rm.device != nil
+		name := rm.deviceName
+		connAt := rm.connectedAt
+		rm.mu.Unlock()
+		if hasDevice {
+			agents = append(agents, AgentInfo{
+				RoomID:      id,
+				Name:        name,
+				ConnectedAt: connAt.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	roomsMu.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"agents": agents})
+}
+
 // ─── 入口 ─────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -246,6 +297,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsHandler)
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/agents", agentsHandler)
 	mux.Handle("/", http.FileServer(http.Dir(*web)))
 
 	srv := &http.Server{

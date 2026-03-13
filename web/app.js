@@ -2,7 +2,7 @@
  * Any-KVM Web Console — app.js
  *
  * 职责：
- *  1. 信令 WebSocket 连接
+ *  1. 从信令服务器获取在线 Agent 列表，点击一键连接
  *  2. WebRTC RTCPeerConnection 管理（SDP/ICE 协商）
  *  3. 视频/音频轨道绑定到 <video>
  *  4. 键盘/鼠标事件捕获 → 二进制帧 → DataChannel
@@ -12,6 +12,19 @@
 'use strict';
 
 const App = (() => {
+
+    // ─── 内置 STUN 服务器列表（自动使用，无需用户填写）────────────────────────
+    // 同时包含国际和国内友好节点，WebRTC 引擎会自动挑选最快的
+    const BUILTIN_STUN = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        { urls: 'stun:stun.miwifi.com:3478' },      // 小米，国内友好
+    ];
+
+    // 默认信令服务器（填写你的公网服务器地址，用户可在界面修改并自动记忆）
+    const DEFAULT_SIGNAL = 'ws://47.86.7.158:8080/ws';
+    const LS_KEY_SERVER = 'anykvm_server_url';
 
     // ─── DOM 引用 ────────────────────────────────────────────────────────────
     const $ = id => document.getElementById(id);
@@ -26,29 +39,126 @@ const App = (() => {
     const statsText = $('stats-text');
     const roomLabel = $('room-label');
     const btnAudio = $('btn-audio');
+    const btnRefresh = $('btn-refresh');
+    const agentList = $('agent-list');
+    const agentListHint = $('agent-list-hint');
     const sbIce = $('sb-ice');
     const sbRes = $('sb-resolution');
     const sbFps = $('sb-fps');
     const sbLatency = $('sb-latency');
     const sbHint = $('sb-hint');
-    const btnConnect = $('btn-connect');
+    const signalInput = $('signal-url');
 
     // ─── 状态 ────────────────────────────────────────────────────────────────
-    let ws = null;   // WebSocket（信令）
-    let pc = null;   // RTCPeerConnection
-    let dc = null;   // DataChannel（HID 控制）
+    let ws = null;
+    let pc = null;
+    let dc = null;
     let audioEnabled = false;
     let captureActive = false;
     let statsTimer = null;
-    let reconnectTimer = null;
     let pingTime = 0;
+    let currentRoomId = '';
 
-    // HID 状态
-    const hid = {
-        modifier: 0,
-        keys: new Set(),
-        buttons: 0,
-    };
+    const hid = { modifier: 0, keys: new Set(), buttons: 0 };
+
+    // ─── 初始化：读取上次使用的服务器地址 ────────────────────────────────────
+    (function init() {
+        const saved = localStorage.getItem(LS_KEY_SERVER) || DEFAULT_SIGNAL;
+        signalInput.value = saved;
+        // 页面加载时自动拉取设备列表
+        fetchAgents();
+    })();
+
+    // ─── 服务器地址 → HTTP API base url ──────────────────────────────────────
+    function wsToHttp(wsUrl) {
+        return wsUrl.trim()
+            .replace(/^ws:\/\//, 'http://')
+            .replace(/^wss:\/\//, 'https://')
+            .replace(/\/ws$/, '');
+    }
+
+    // ─── 获取 Agent 列表 ─────────────────────────────────────────────────────
+    async function fetchAgents() {
+        const rawUrl = signalInput.value.trim();
+        if (!rawUrl) return;
+
+        localStorage.setItem(LS_KEY_SERVER, rawUrl);
+        connectError.textContent = '';
+        btnRefresh.classList.add('spin');
+        agentListHint.textContent = '获取中…';
+        agentList.innerHTML = '';
+
+        try {
+            const base = wsToHttp(rawUrl);
+            const resp = await fetch(`${base}/api/agents`, { signal: AbortSignal.timeout(5000) });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            renderAgentList(data.agents || []);
+        } catch (e) {
+            agentListHint.textContent = '无法连接服务器，请检查地址或确认服务正在运行';
+            agentListHint.style.color = 'var(--danger)';
+            console.warn('fetchAgents error:', e);
+        } finally {
+            btnRefresh.classList.remove('spin');
+        }
+    }
+
+    function renderAgentList(agents) {
+        agentListHint.style.color = '';
+        if (agents.length === 0) {
+            agentListHint.textContent = '暂无在线设备，请确认 any-kvm-agent 已在设备上运行';
+            agentList.innerHTML = '';
+            return;
+        }
+        agentListHint.textContent = `发现 ${agents.length} 台在线设备：`;
+        agentList.innerHTML = '';
+        agents.forEach(agent => {
+            const connectedAgo = agent.connected_at
+                ? (() => {
+                    const sec = Math.floor((Date.now() - new Date(agent.connected_at)) / 1000);
+                    if (sec < 60) return `${sec}秒前连接`;
+                    if (sec < 3600) return `${Math.floor(sec / 60)}分钟前连接`;
+                    return `${Math.floor(sec / 3600)}小时前连接`;
+                })()
+                : '';
+            const card = document.createElement('div');
+            card.className = 'agent-card';
+            card.innerHTML = `
+                <span class="agent-icon">💻</span>
+                <div class="agent-info">
+                    <div class="agent-name">${escHtml(agent.name || agent.room_id)}</div>
+                    <div class="agent-meta">房间: ${escHtml(agent.room_id)}${connectedAgo ? '  ·  ' + connectedAgo : ''}</div>
+                </div>
+                <span class="agent-online" title="在线"></span>
+                <button class="btn-connect-agent">连接</button>
+            `;
+            card.querySelector('.btn-connect-agent').addEventListener('click', () => {
+                connectToAgent(agent.room_id);
+            });
+            agentList.appendChild(card);
+        });
+    }
+
+    function escHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ─── 连接到指定 Agent ─────────────────────────────────────────────────────
+    function connectToAgent(roomId) {
+        const signalUrl = signalInput.value.trim();
+        if (!signalUrl) { setError('请填写信令服务器地址'); return; }
+        if (!/^wss?:\/\//.test(signalUrl)) {
+            setError('地址格式错误，应以 ws:// 或 wss:// 开头');
+            return;
+        }
+        connectError.textContent = '';
+        currentRoomId = roomId;
+        reset();
+        showConsole(roomId);
+        connectSignal(signalUrl, roomId);
+    }
 
     // ─── HID 帧格式（8 字节，对应设备端 hid.rs 协议）────────────────────────
     //  type=0x01 键盘  : [0x01, modifier, key1, key2, key3, key4, key5, key6]
@@ -221,15 +331,10 @@ const App = (() => {
     // ─── ICE / RTCPeerConnection ──────────────────────────────────────────────
 
     function buildIceServers() {
-        const stuns = $('stun-servers').value.trim().split(',')
-            .map(s => s.trim()).filter(Boolean)
-            .map(url => ({ urls: url }));
-
-        const servers = [...stuns];
-
-        const turnUrl = $('turn-url').value.trim();
-        const turnUser = $('turn-user').value.trim();
-        const turnPass = $('turn-pass').value.trim();
+        const servers = [...BUILTIN_STUN];
+        const turnUrl = $('turn-url') ? $('turn-url').value.trim() : '';
+        const turnUser = $('turn-user') ? $('turn-user').value.trim() : '';
+        const turnPass = $('turn-pass') ? $('turn-pass').value.trim() : '';
         if (turnUrl) {
             servers.push({ urls: turnUrl, username: turnUser, credential: turnPass });
         }
@@ -418,30 +523,16 @@ const App = (() => {
     // ─── 公共 API ─────────────────────────────────────────────────────────────
 
     function connect() {
-        const signalUrl = $('signal-url').value.trim();
-        const roomId = $('room-id').value.trim();
-
-        if (!signalUrl || !roomId) {
-            setError('请填写信令服务器地址和房间 ID');
-            return;
-        }
-        if (!/^wss?:\/\//.test(signalUrl)) {
-            setError('信令服务器地址格式错误，应以 ws:// 或 wss:// 开头');
-            return;
-        }
-
-        btnConnect.disabled = true;
-        connectError.textContent = '';
-        reset();
-        showConsole(roomId);
-        connectSignal(signalUrl, roomId);
+        // 兼容旧调用（页面无 room-id 输入框，直接用 fetchAgents 流程）
+        fetchAgents();
     }
 
     function disconnect() {
         reset();
         consolePanel.classList.add('hidden');
         connectPanel.classList.remove('hidden');
-        btnConnect.disabled = false;
+        // 断开后自动刷新设备列表
+        fetchAgents();
     }
 
     function toggleFullscreen() {
@@ -464,12 +555,10 @@ const App = (() => {
 
     function sendCtrlAltDel() {
         if (!dc || dc.readyState !== 'open') return;
-        // 按下
-        sendHid(new Uint8Array([0x01, 0x01 | 0x04, 0x4c, 0, 0, 0, 0, 0])); // Ctrl+Alt+Delete
-        // 30ms 后释放
+        sendHid(new Uint8Array([0x01, 0x01 | 0x04, 0x4c, 0, 0, 0, 0, 0]));
         setTimeout(() => sendHid(new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0])), 30);
     }
 
-    return { connect, disconnect, toggleFullscreen, toggleAudio, sendCtrlAltDel };
+    return { connect, disconnect, toggleFullscreen, toggleAudio, sendCtrlAltDel, fetchAgents };
 
 })();

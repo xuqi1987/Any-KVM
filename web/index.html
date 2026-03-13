@@ -1,95 +1,98 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Any-KVM 控制台</title>
   <link rel="stylesheet" href="style.css" />
 </head>
+
 <body>
 
-<!-- ═══════════════════ 连接界面 ═══════════════════════════════════════════ -->
-<div id="connect-panel">
-  <div class="connect-card">
-    <h1>🖥️ Any-KVM</h1>
-    <p class="subtitle">远程 KVM 控制台</p>
+  <!-- ═══════════════════ 连接界面 ═══════════════════════════════════════════ -->
+  <div id="connect-panel">
+    <div class="connect-card">
+      <h1>🖥️ Any-KVM</h1>
+      <p class="subtitle">远程 KVM 控制台</p>
 
-    <div class="form-group">
-      <label for="signal-url">信令服务器地址</label>
-      <input id="signal-url" type="text" value="ws://localhost:8080/ws"
-             placeholder="ws://your-server:8080/ws" spellcheck="false" />
-    </div>
-
-    <div class="form-group">
-      <label for="room-id">房间 ID</label>
-      <input id="room-id" type="text" value="kvm-room-1"
-             placeholder="自定义房间名称" spellcheck="false" />
-    </div>
-
-    <div class="form-group">
-      <label for="stun-servers">STUN 服务器（逗号分隔）</label>
-      <input id="stun-servers" type="text" spellcheck="false"
-             value="stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302" />
-    </div>
-
-    <details class="turn-section">
-      <summary>TURN 服务器（可选，P2P 失败时中继）</summary>
-      <div class="form-group" style="margin-top:10px">
-        <input id="turn-url"  type="text" placeholder="turn:your-server:3478" spellcheck="false" />
+      <!-- 服务器地址行 -->
+      <div class="server-row">
+        <input id="signal-url" type="text" placeholder="ws://your-server:8080/ws" spellcheck="false"
+          autocomplete="off" />
+        <button id="btn-refresh" onclick="App.fetchAgents()" title="刷新设备列表">🔄</button>
       </div>
-      <div class="turn-cred-row">
-        <input id="turn-user" type="text"     placeholder="用户名" spellcheck="false" />
-        <input id="turn-pass" type="password" placeholder="密码" />
+
+      <!-- 设备列表 -->
+      <div id="agent-list-wrap">
+        <div id="agent-list-hint" class="agent-hint">输入服务器地址后点击 🔄 获取设备列表</div>
+        <div id="agent-list"></div>
       </div>
-    </details>
 
-    <button id="btn-connect" class="btn-primary" onclick="App.connect()">连接</button>
-    <div id="connect-error" class="error-msg" aria-live="polite"></div>
+      <!-- 高级选项（TURN） -->
+      <details class="turn-section" id="advanced-section">
+        <summary>⚙ 高级选项</summary>
+        <div class="adv-inner">
+          <div class="form-row">
+            <label>TURN 服务器</label>
+            <input id="turn-url" type="text" placeholder="turn:your-server:3478" spellcheck="false" />
+          </div>
+          <div class="form-row two-col">
+            <input id="turn-user" type="text" placeholder="用户名" spellcheck="false" />
+            <input id="turn-pass" type="password" placeholder="密码" />
+          </div>
+          <p class="field-hint" style="margin-top:4px">
+            仅当 P2P 直连失败时需要；可用 <code>deploy/</code> 目录的 coturn 自行部署。
+          </p>
+        </div>
+      </details>
+
+      <div id="connect-error" class="error-msg" aria-live="polite"></div>
+    </div>
   </div>
-</div>
 
-<!-- ═══════════════════ 控制台界面 ══════════════════════════════════════════ -->
-<div id="console-panel" class="hidden">
+  <!-- ═══════════════════ 控制台界面 ══════════════════════════════════════════ -->
+  <div id="console-panel" class="hidden">
 
-  <!-- 工具栏 -->
-  <div id="toolbar" role="toolbar">
-    <span id="room-label" class="room-label"></span>
-    <span id="status-badge" class="badge badge-connecting">连接中…</span>
-    <span id="stats-text" class="stats"></span>
-    <div class="spacer"></div>
-    <button class="btn-tool" onclick="App.toggleFullscreen()" title="全屏 (F11)">⛶</button>
-    <button class="btn-tool" id="btn-audio" onclick="App.toggleAudio()" title="音频开关">🔇</button>
-    <button class="btn-tool" onclick="App.sendCtrlAltDel()" title="发送 Ctrl+Alt+Del">⌨ CAD</button>
-    <button class="btn-tool btn-danger" onclick="App.disconnect()" title="断开连接">✕ 断开</button>
-  </div>
-
-  <!-- 视频区域 -->
-  <div id="video-container">
-    <video id="remote-video" autoplay playsinline muted></video>
-
-    <!-- 等待提示遮罩 -->
-    <div id="video-overlay">
-      <div class="overlay-inner">
-        <div class="spinner"></div>
-        <div id="overlay-msg">等待视频流…</div>
-      </div>
+    <!-- 工具栏 -->
+    <div id="toolbar" role="toolbar">
+      <span id="room-label" class="room-label"></span>
+      <span id="status-badge" class="badge badge-connecting">连接中…</span>
+      <span id="stats-text" class="stats"></span>
+      <div class="spacer"></div>
+      <button class="btn-tool" onclick="App.toggleFullscreen()" title="全屏 (F11)">⛶</button>
+      <button class="btn-tool" id="btn-audio" onclick="App.toggleAudio()" title="音频开关">🔇</button>
+      <button class="btn-tool" onclick="App.sendCtrlAltDel()" title="发送 Ctrl+Alt+Del">⌨ CAD</button>
+      <button class="btn-tool btn-danger" onclick="App.disconnect()" title="断开连接">✕ 断开</button>
     </div>
 
-    <!-- 鼠标/键盘捕获层 -->
-    <div id="mouse-capture" tabindex="0"
-         aria-label="KVM 控制区域，点击激活鼠标捕获"></div>
+    <!-- 视频区域 -->
+    <div id="video-container">
+      <video id="remote-video" autoplay playsinline muted></video>
+
+      <!-- 等待提示遮罩 -->
+      <div id="video-overlay">
+        <div class="overlay-inner">
+          <div class="spinner"></div>
+          <div id="overlay-msg">等待视频流…</div>
+        </div>
+      </div>
+
+      <!-- 鼠标/键盘捕获层 -->
+      <div id="mouse-capture" tabindex="0" aria-label="KVM 控制区域，点击激活鼠标捕获"></div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div id="statusbar">
+      <span id="sb-ice">ICE: —</span>
+      <span id="sb-resolution">—</span>
+      <span id="sb-fps">—</span>
+      <span id="sb-latency">延迟: —</span>
+      <span id="sb-hint" class="sb-hint">点击视频区域激活键鼠控制</span>
+    </div>
   </div>
 
-  <!-- 状态栏 -->
-  <div id="statusbar">
-    <span id="sb-ice">ICE: —</span>
-    <span id="sb-resolution">—</span>
-    <span id="sb-fps">—</span>
-    <span id="sb-latency">延迟: —</span>
-    <span id="sb-hint" class="sb-hint">点击视频区域激活键鼠控制</span>
-  </div>
-</div>
-
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
+
 </html>

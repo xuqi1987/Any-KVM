@@ -1,0 +1,20 @@
+[Unit]
+Description=Any-KVM Device Agent
+Documentation=https://github.com/any-kvm/any-kvm
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/any-kvm-agent /etc/any-kvm-agent/config.toml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=any-kvm-agent
+
+# 设备访问权限
+SupplementaryGroups=video audio input
+
+[Install]
+WantedBy=multi-user.target
