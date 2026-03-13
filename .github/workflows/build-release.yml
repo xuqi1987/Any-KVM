@@ -18,7 +18,7 @@ jobs:
   # ── Rust Agent 交叉编译 ────────────────────────────────────────────────────
   build-agent:
     name: Build Agent (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
