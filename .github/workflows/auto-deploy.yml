@@ -58,8 +58,30 @@ jobs:
               cd Any-KVM && git pull && cd /root
               echo "✓ 代码已更新"
           else
-              git clone https://github.com/xuqi1987/Any-KVM.git
-              echo "✓ 代码已克隆"
+              # 添加重试机制
+              MAX_RETRIES=3
+              RETRY_DELAY=5
+              CLONE_TIMEOUT=300
+              RETRY_COUNT=0
+              CLONE_SUCCESS=0
+
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ $CLONE_SUCCESS -eq 0 ]; do
+                  RETRY_COUNT=$((RETRY_COUNT + 1))
+                  echo "尝试克隆代码 (第 ${RETRY_COUNT}/${MAX_RETRIES} 次)..."
+
+                  if timeout $CLONE_TIMEOUT git clone --depth 1 https://github.com/xuqi1987/Any-KVM.git; then
+                      CLONE_SUCCESS=1
+                      echo "✓ 代码已克隆"
+                  else
+                      echo "⚠ 克隆失败，等待 ${RETRY_DELAY} 秒后重试..."
+                      sleep $RETRY_DELAY
+                  fi
+              done
+
+              if [ $CLONE_SUCCESS -eq 0 ]; then
+                  echo "Error: 克隆代码失败，已重试 ${MAX_RETRIES} 次" >&2
+                  exit 1
+              fi
           fi
 
           # 配置
