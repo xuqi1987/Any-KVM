@@ -26,6 +26,8 @@ scrap          = { version = "0.5", optional = true }
 
 # ─── 视频编码（libx264 软编，硬编通过 V4L2 M2M 直接输出 H.264）────────────────
 openh264       = { version = "0.6", features = ["source"] }
+# MJPEG 解码（纯 Rust，MJPEG 格式采集卡使用）
+jpeg-decoder   = { version = "0.3", optional = true }
 
 # ─── 音频采集（ALSA）──────────────────────────────────────────────────────────
 alsa           = "0.9"
@@ -54,7 +56,7 @@ urlencoding    = "2"
 [features]
 default = ["v4l2-capture", "screen-capture"]
 # 启用 V4L2 视频采集（依赖 libv4l-dev 系统头文件）
-v4l2-capture = ["v4l"]
+v4l2-capture = ["v4l", "jpeg-decoder"]
 # 启用 CH9329 串口 HID 支持（依赖 libudev，Linux 专用）
 ch9329 = ["serialport"]
 # 启用屏幕截图视频源（依赖 libxcb，需 X11 环境；ARM 嵌入式且无显示器时可不启用）
@@ -68,3 +70,6 @@ panic      = "abort"
 
 [profile.dev]
 opt-level  = 1   # 加快增量编译，降低调试时的 CPU 耗时
+
+[patch.crates-io]
+str0m = { path = "patches/str0m-0.5.1" }

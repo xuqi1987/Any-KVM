@@ -26,7 +26,6 @@ use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
 #[cfg(feature = "v4l2-capture")]
 use v4l::{Device, FourCC};
-
 pub fn run(cfg: VideoConfig, tx: Sender<Bytes>, keyframe_flag: Arc<AtomicBool>) -> Result<()> {
     match cfg.source.as_str() {
         "screen" => {
@@ -54,7 +53,10 @@ pub fn run(cfg: VideoConfig, tx: Sender<Bytes>, keyframe_flag: Arc<AtomicBool>) 
                 let hw_ok = cfg.hw_encode && try_hw_h264(&dev, &cfg, &tx).is_ok();
                 if !hw_ok {
                     warn!("video: hardware H.264 not available, falling back to openh264");
-                    run_sw_h264(&dev, &cfg, &tx, &keyframe_flag)?;
+                    if let Err(e) = run_sw_h264(&dev, &cfg, &tx, &keyframe_flag) {
+                        warn!("video: YUYV capture failed: {e}, trying MJPEG");
+                        run_mjpeg_h264(&dev, &cfg, &tx, &keyframe_flag)?;
+                    }
                 }
             }
             #[cfg(not(feature = "v4l2-capture"))]
@@ -117,7 +119,9 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
     params.interval = v4l::Fraction { numerator: 1, denominator: cfg.fps };
     dev.set_params(&params)?;
 
-    info!("video: SW H264 {}×{} @{}fps via openh264", cfg.width, cfg.height, cfg.fps);
+    let w = actual.width as usize;
+    let h = actual.height as usize;
+    info!("video: SW H264 {}×{} @{}fps via openh264 (requested {}×{})", w, h, cfg.fps, cfg.width, cfg.height);
 
     let api = openh264::OpenH264API::from_source();
     let enc_cfg = openh264::encoder::EncoderConfig::new()
@@ -126,10 +130,11 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
         .debug(false);
     let mut encoder = openh264::encoder::Encoder::with_api_config(api, enc_cfg)
         .context("failed to init openh264 encoder")?;
-
-    let w = cfg.width as usize;
-    let h = cfg.height as usize;
     let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)?;
+
+    // Debug: save first 30 frames to /tmp/debug_video.h264 for offline validation
+    let mut debug_file: Option<std::fs::File> = std::fs::File::create("/tmp/debug_video.h264").ok();
+    let mut frame_count = 0u32;
 
     loop {
         let (buf, _meta) = stream.next()?;
@@ -141,13 +146,143 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
         let src = openh264::formats::YUVBuffer::from_vec(yuv, w, h);
         let bitstream = encoder.encode(&src).context("openh264 encode error")?;
         let encoded = Bytes::from(bitstream.to_vec());
-        if !encoded.is_empty() && tx.blocking_send(encoded).is_err() {
-            return Ok(());
+        if !encoded.is_empty() {
+            frame_count += 1;
+            if let Some(ref mut f) = debug_file {
+                if frame_count <= 30 {
+                    use std::io::Write;
+                    let _ = f.write_all(&encoded);
+                    if frame_count == 30 {
+                        info!("video: saved 30 frames to /tmp/debug_video.h264");
+                        debug_file = None;
+                    }
+                }
+            }
+            if tx.blocking_send(encoded).is_err() {
+                return Ok(());
+            }
         }
     }
 }
 
-// ─── 屏幕截图源（feature: screen-capture）────────────────────────────────────
+// ─── 软件 H.264（MJPEG → decode JPEG → openh264）────────────────────────────
+
+#[cfg(feature = "v4l2-capture")]
+fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {
+    let mut fmt = dev.format()?;
+    fmt.width  = cfg.width;
+    fmt.height = cfg.height;
+    fmt.fourcc = FourCC::new(b"MJPG");
+    let actual = dev.set_format(&fmt)?;
+    if actual.fourcc != FourCC::new(b"MJPG") {
+        bail!("device does not support MJPEG format");
+    }
+
+    let mut params = dev.params()?;
+    params.interval = v4l::Fraction { numerator: 1, denominator: cfg.fps };
+    dev.set_params(&params)?;
+
+    let w = actual.width as usize;
+    let h = actual.height as usize;
+    info!("video: MJPEG→H264 {}×{} @{}fps via openh264 (requested {}×{})", w, h, cfg.fps, cfg.width, cfg.height);
+
+    let api = openh264::OpenH264API::from_source();
+    let enc_cfg = openh264::encoder::EncoderConfig::new()
+        .set_bitrate_bps(cfg.bitrate_kbps * 1000)
+        .max_frame_rate(cfg.fps as f32)
+        .debug(false);
+    let mut encoder = openh264::encoder::Encoder::with_api_config(api, enc_cfg)
+        .context("failed to init openh264 encoder")?;
+    let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)?;
+
+    loop {
+        let (buf, _meta) = stream.next()?;
+        if keyframe_flag.swap(false, Ordering::Relaxed) {
+            encoder.force_intra_frame();
+            debug!("video: forcing IDR frame (keyframe requested)");
+        }
+        let yuv = match mjpeg_to_yuv420(buf, w, h) {
+            Ok(y) => y,
+            Err(e) => {
+                debug!("video: MJPEG decode error: {e}");
+                continue;
+            }
+        };
+        let src = openh264::formats::YUVBuffer::from_vec(yuv, w, h);
+        let bitstream = encoder.encode(&src).context("openh264 encode error")?;
+        let encoded = Bytes::from(bitstream.to_vec());
+        if !encoded.is_empty() {
+            if tx.blocking_send(encoded).is_err() {
+                return Ok(());
+            }
+        }
+    }
+}
+
+// ─── MJPEG → YUV420 平面转换 ──────────────────────────────────────────────────
+
+#[cfg(feature = "v4l2-capture")]
+fn mjpeg_to_yuv420(jpeg_data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
+    use jpeg_decoder::Decoder;
+
+    let mut decoder = Decoder::new(std::io::Cursor::new(jpeg_data));
+    let pixels = decoder.decode().context("JPEG decode failed")?;
+    let info = decoder.info().unwrap();
+    let src_w = info.width as usize;
+    let src_h = info.height as usize;
+
+    let frame_size = w * h;
+    let mut yuv = vec![0u8; frame_size * 3 / 2];
+
+    let pixel_format = info.pixel_format;
+    let bytes_per_pixel = match pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => 3,
+        jpeg_decoder::PixelFormat::L8    => 1,
+        jpeg_decoder::PixelFormat::CMYK32 => 4,
+        _ => bail!("unsupported JPEG pixel format: {:?}", pixel_format),
+    };
+
+    let scale_x = src_w as f32 / w as f32;
+    let scale_y = src_h as f32 / h as f32;
+
+    // Y plane
+    for dy in 0..h {
+        let sy = (dy as f32 * scale_y) as usize;
+        for dx in 0..w {
+            let sx = (dx as f32 * scale_x) as usize;
+            let i = (sy * src_w + sx) * bytes_per_pixel;
+            let (r, g, b) = match pixel_format {
+                jpeg_decoder::PixelFormat::RGB24 => (pixels[i] as i32, pixels[i+1] as i32, pixels[i+2] as i32),
+                jpeg_decoder::PixelFormat::L8    => (pixels[i] as i32, pixels[i] as i32, pixels[i] as i32),
+                _ => (0, 0, 0),
+            };
+            let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            yuv[dy * w + dx] = y.clamp(0, 255) as u8;
+        }
+    }
+    // U/V planes
+    let uv_start = frame_size;
+    for dy in (0..h).step_by(2) {
+        let sy = (dy as f32 * scale_y) as usize;
+        for dx in (0..w).step_by(2) {
+            let sx = (dx as f32 * scale_x) as usize;
+            let i = (sy * src_w + sx) * bytes_per_pixel;
+            let (r, g, b) = match pixel_format {
+                jpeg_decoder::PixelFormat::RGB24 => (pixels[i] as i32, pixels[i+1] as i32, pixels[i+2] as i32),
+                jpeg_decoder::PixelFormat::L8    => (pixels[i] as i32, pixels[i] as i32, pixels[i] as i32),
+                _ => (0, 0, 0),
+            };
+            let u = ((-38 * r -  74 * g + 112 * b + 128) >> 8) + 128;
+            let v = ((112 * r -  94 * g -  18 * b + 128) >> 8) + 128;
+            let idx = (dy / 2) * (w / 2) + dx / 2;
+            yuv[uv_start + idx] = u.clamp(0, 255) as u8;
+            yuv[uv_start + frame_size / 4 + idx] = v.clamp(0, 255) as u8;
+        }
+    }
+    Ok(yuv)
+}
+
+
 
 #[cfg(feature = "screen-capture")]
 fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {

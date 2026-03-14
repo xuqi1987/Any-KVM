@@ -1,0 +1,56 @@
+[package]
+name = "str0m"
+version = "0.5.1"
+authors = ["Martin Algesten <martin@algesten.se>", "Hugo Tunius <h@tunius.se>", "Davide Bertola <dade@dadeb.it>"]
+description = "WebRTC library in Sans-IO style"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/algesten/str0m"
+readme = "README.md"
+keywords = ["webrtc", "streaming", "video", "audio", "media"]
+categories = ["web-programming", "multimedia", "network-programming"]
+edition = "2021"
+exclude = ["/cargo_deny.sh", "/deny.toml", "/run-fuzz.sh"]
+
+[features]
+default = ["openssl"]
+openssl = ["dep:openssl", "dep:openssl-sys"]
+_internal_dont_use_log_stats = []
+_internal_test_exports = []
+
+[dependencies]
+thiserror = "1.0.38"
+tracing = "0.1.37"
+fastrand = "2.0.1"
+once_cell = "1.17.0"
+sctp-proto = "0.2.0"
+combine = "4.6.6"
+# Sadly no DTLS support in rustls.
+# If you want to use a system provided openssl you can set env variable
+# OPENSSL_NO_VENDOR=1 to override the feature flag vendored
+openssl = { version = "0.10.45", features = ["vendored"], optional = true }
+openssl-sys = { version = "0.9.80", optional = true }
+# STUN
+hmac = "0.12.1"
+crc = "3.0.0"
+serde = { version = "1.0.152", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+sha-1 = { version = "0.10.1", features = ["asm"] }
+
+# Don't use `asm` on Windows until https://github.com/RustCrypto/asm-hashes/issues/45 is fixed.
+# The `asm` feature isn't compatible with `windows-msvc` toolchain and `openssl` breaks if we want to use `windows-gnu`.
+# Thus, don't use `asm` feature on Windows.
+[target.'cfg(windows)'.dependencies]
+sha-1 = { version = "0.10.1" }
+
+[dev-dependencies]
+rouille = { version = "3.5.0", features = ["ssl"] }
+serde_json = "1.0"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter", "std"] }
+systemstat = "0.2.2"
+_str0m_test = { path = "_str0m_test" } # dummy package that enables "_internal_test_exports"
+
+# This is to ensure MSRV 1.65
+# Remove when we move MSRV
+time = "=0.3.23"
+pcap-file = "2.0.0"

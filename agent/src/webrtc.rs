@@ -42,12 +42,18 @@ pub async fn run(
     let local_port = socket.local_addr()?.port();
     info!("webrtc: UDP socket bound on port {}", local_port);
 
-    // ─── 确定主出口 IP（用于 Receive::new 的 dst 地址匹配）─────────────────
+    // ─── 确定本机所有 IP（用于 Receive::new 的 dst 地址匹配）─────────────────
     let local_ips = get_local_ips();
     let primary_ip = local_ips.first().copied()
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let local_addr = SocketAddr::new(primary_ip, local_port);
-    info!("webrtc: primary local address {}", local_addr);
+    // Build a list of all local socket addresses for Receive::new dst matching
+    let local_addrs: Vec<SocketAddr> = if local_ips.is_empty() {
+        vec![local_addr]
+    } else {
+        local_ips.iter().map(|&ip| SocketAddr::new(ip, local_port)).collect()
+    };
+    info!("webrtc: primary local address {}, all addrs: {:?}", local_addr, local_addrs);
 
     // ─── 构建 str0m Rtc 实例 ─────────────────────────────────────────────────
     let mut rtc = Rtc::builder().build();
@@ -112,6 +118,7 @@ pub async fn run(
     let (offer_sdp, pending, video_mid, audio_mid) = build_full_offer(&mut rtc)?;
     info!("webrtc: SDP offer created ({} bytes)", offer_sdp.len());
 
+    debug!("webrtc: SDP offer:\n{}", offer_sdp);
     offer_tx.send(offer_sdp).map_err(|_| anyhow::anyhow!("offer channel closed"))?;
 
     // ─── 等待 SDP answer（无超时：等浏览器主动连接）──────────────────────────
@@ -225,8 +232,17 @@ pub async fn run(
                 }
                 Output::Transmit(send) => {
                     transmit_count += 1;
-                    if transmit_count == 1 {
-                        info!("webrtc: first Transmit output ({} bytes to {})", send.contents.len(), send.destination);
+                    if transmit_count <= 10 {
+                        let b = &send.contents;
+                        let ptype = if b.len() > 1 && (b[0] & 0xC0) == 0x80 {
+                            format!("RTP pt={} seq={} ts={} ssrc={}", b[1] & 0x7F,
+                                u16::from_be_bytes([b[2], b[3]]),
+                                u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+                                u32::from_be_bytes([b[8], b[9], b[10], b[11]]))
+                        } else {
+                            format!("non-RTP first_byte=0x{:02x}", b[0])
+                        };
+                        info!("webrtc: Transmit #{} ({} bytes to {} via {}) {}", transmit_count, b.len(), send.destination, send.source, ptype);
                     }
                     // 如果源地址是 relay 地址，通过 TURN Send indication 发送
                     if let (Some(raddr), Some(ref ts)) = (relay_addr, &turn_state) {
@@ -275,12 +291,15 @@ pub async fn run(
                             continue;
                         }
                     }
-                    // 普通 UDP 数据
-                    match Receive::new(Protocol::Udp, from, local_addr, &buf[..n]) {
-                        Ok(recv) => {
-                            rtc.handle_input(Input::Receive(Instant::now(), recv))?;
+                    // 普通 UDP 数据：尝试所有本地候选地址匹配 dst，找到第一个成功的
+                    for &la in &local_addrs {
+                        match Receive::new(Protocol::Udp, from, la, &buf[..n]) {
+                            Ok(recv) => {
+                                rtc.handle_input(Input::Receive(Instant::now(), recv))?;
+                                break;
+                            }
+                            Err(_) => {}
                         }
-                        Err(_) => {}
                     }
                 }
             }
@@ -294,8 +313,8 @@ use str0m::change::SdpPendingOffer;
 
 fn build_full_offer(rtc: &mut Rtc) -> Result<(String, SdpPendingOffer, Mid, Mid)> {
     let mut change = rtc.sdp_api();
-    let video_mid = change.add_media(str0m::media::MediaKind::Video, Direction::SendOnly, None, None);
-    let audio_mid = change.add_media(str0m::media::MediaKind::Audio, Direction::SendOnly, None, None);
+    let video_mid = change.add_media(str0m::media::MediaKind::Video, Direction::SendOnly, Some("anykvm".into()), None);
+    let audio_mid = change.add_media(str0m::media::MediaKind::Audio, Direction::SendOnly, Some("anykvm".into()), None);
     change.add_channel("hid-control".to_string());
     let (offer, pending) = change.apply()
         .ok_or_else(|| anyhow::anyhow!("SDP apply returned None — no media changes"))?;
@@ -321,8 +340,11 @@ fn send_video(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32, write_count: &mut u
         return;
     };
     *write_count += 1;
-    if *write_count == 1 {
-        info!("webrtc: send_video — writing first H.264 frame ({} bytes, mid={}, pt={})", data.len(), mid, pt);
+    if *write_count <= 5 {
+        let hex_prefix: String = data.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        info!("webrtc: send_video — frame #{} ({} bytes, mid={}, pt={}, ts={}) hex: {}",
+            write_count, data.len(), mid, pt, ts, hex_prefix);
+        info!("webrtc: send_video — frame #{} NAL types: {}", write_count, describe_h264_nals(data));
     }
     if let Err(e) = writer.write(pt, Instant::now(), MediaTime::from_90khz(ts as i64), data.to_vec()) {
         if *write_count <= 5 || *write_count % 100 == 0 {
@@ -341,6 +363,12 @@ fn send_audio(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32) {
 /// 返回 true 表示应退出主循环（ICE 已失败/断开）
 async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut bool, keyframe_flag: &Arc<AtomicBool>) -> bool {
     match event {
+        Event::Connected => {
+            // Both ICE and DTLS are fully established — safe to send media now
+            info!("webrtc: ICE+DTLS connected, media can now flow");
+            *ice_connected = true;
+            keyframe_flag.store(true, Ordering::Relaxed);
+        }
         Event::ChannelData(data) => {
             let _ = hid_tx.send(Bytes::copy_from_slice(&data.data)).await;
         }
@@ -349,11 +377,10 @@ async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut 
             use str0m::IceConnectionState;
             match s {
                 IceConnectionState::Connected | IceConnectionState::Completed => {
-                    if !*ice_connected {
-                        info!("webrtc: ICE just connected, requesting IDR for first frame");
-                        keyframe_flag.store(true, Ordering::Relaxed);
-                    }
-                    *ice_connected = true;
+                    // ICE is ready but DTLS may not be done yet — pre-request IDR so encoder
+                    // has a keyframe ready by the time Event::Connected fires
+                    info!("webrtc: ICE connected, pre-requesting IDR keyframe");
+                    keyframe_flag.store(true, Ordering::Relaxed);
                 }
                 IceConnectionState::Disconnected => {
                     if *ice_connected {

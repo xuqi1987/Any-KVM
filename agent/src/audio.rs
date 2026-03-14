@@ -30,8 +30,8 @@ pub fn run(cfg: AudioConfig, tx: Sender<Bytes>) -> Result<()> {
         hwp.set_format(alsa::pcm::Format::s16()).context("ALSA set format")?;
         hwp.set_access(alsa::pcm::Access::RWInterleaved)?;
         // 缓冲区大小设为 4 帧，降低延迟
-        hwp.set_buffer_size(FRAME_SAMPLES as i64 * 4)?;
-        hwp.set_period_size(FRAME_SAMPLES as i64, alsa::ValueOr::Nearest)?;
+        hwp.set_buffer_size((FRAME_SAMPLES * 4) as _)?;
+        hwp.set_period_size(FRAME_SAMPLES as _, alsa::ValueOr::Nearest)?;
         alsa.hw_params(&hwp)?;
     }
     alsa.prepare()?;

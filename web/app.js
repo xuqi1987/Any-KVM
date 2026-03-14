@@ -353,17 +353,24 @@ const App = (() => {
 
         // 接收远端 video + audio 轨道
         pc.ontrack = ({ track, streams }) => {
+            console.log('ontrack:', track.kind, 'streams:', streams.length);
+            const stream = streams[0] || new MediaStream();
             if (track.kind === 'video') {
-                remoteVideo.srcObject = streams[0];
+                stream.addTrack(track);
+                remoteVideo.srcObject = stream;
+                remoteVideo.play().catch(e => console.warn('video play:', e));
                 remoteVideo.onloadedmetadata = () => {
                     videoOverlay.classList.add('hidden');
                     sbRes.textContent = `${remoteVideo.videoWidth}×${remoteVideo.videoHeight}`;
                 };
             }
             if (track.kind === 'audio') {
-                if (!remoteVideo.srcObject) remoteVideo.srcObject = streams[0];
-                else streams[0].getAudioTracks().forEach(t =>
-                    remoteVideo.srcObject.addTrack(t));
+                if (!remoteVideo.srcObject) {
+                    stream.addTrack(track);
+                    remoteVideo.srcObject = stream;
+                } else {
+                    remoteVideo.srcObject.addTrack(track);
+                }
                 if (!audioEnabled) track.enabled = false;
             }
         };
@@ -488,10 +495,14 @@ const App = (() => {
         statsTimer = setInterval(async () => {
             if (!pc) return;
             const stats = await pc.getStats();
-            let fps = 0, bytesSent = 0, rtt = 0;
+            let fps = 0, rtt = 0, pkts = 0, bytes = 0, decoded = 0, dropped = 0;
             stats.forEach(r => {
                 if (r.type === 'inbound-rtp' && r.kind === 'video') {
                     fps = r.framesPerSecond ? r.framesPerSecond.toFixed(0) : fps;
+                    pkts = r.packetsReceived || 0;
+                    bytes = r.bytesReceived || 0;
+                    decoded = r.framesDecoded || 0;
+                    dropped = r.framesDropped || 0;
                 }
                 if (r.type === 'candidate-pair' && r.state === 'succeeded') {
                     rtt = r.currentRoundTripTime ? (r.currentRoundTripTime * 1000).toFixed(0) : rtt;
@@ -499,6 +510,17 @@ const App = (() => {
             });
             sbFps.textContent = fps ? `${fps} fps` : '';
             sbLatency.textContent = rtt ? `延迟: ${rtt} ms` : '';
+            if (pkts > 0) {
+                statsText.textContent = `pkts:${pkts} dec:${decoded} drop:${dropped} ${(bytes / 1024).toFixed(0)}KB`;
+            }
+            // Show stats on overlay when video not playing (debug)
+            if (pkts > 0 && !videoOverlay.classList.contains('hidden')) {
+                overlayMsg.textContent = `video pkts:${pkts} decoded:${decoded} dropped:${dropped} bytes:${(bytes / 1024).toFixed(0)}KB fps:${fps} rtt:${rtt}ms`;
+            }
+            // Log detailed stats to console for debugging
+            if (pkts > 0 && decoded === 0) {
+                console.warn('[diag] Receiving video packets but 0 frames decoded!', { pkts, bytes, decoded, dropped, fps });
+            }
         }, 2000);
     }
 
