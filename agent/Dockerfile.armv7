@@ -1,0 +1,39 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install basic tools and ARM cross-compilation toolchain (native x86_64)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gcc g++ make cmake clang \
+    gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+    libc6-dev-armhf-cross \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add armhf architecture with ports.ubuntu.com repo (armhf packages are on ports, not archive)
+RUN dpkg --add-architecture armhf \
+    && echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main universe" > /etc/apt/sources.list.d/armhf.list \
+    && echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe" >> /etc/apt/sources.list.d/armhf.list \
+    && echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main universe" >> /etc/apt/sources.list.d/armhf.list \
+    && sed -i 's|^deb http|deb [arch=amd64] http|g' /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    libasound2-dev:armhf \
+    libssl-dev:armhf \
+    libudev-dev:armhf \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust with armv7 target
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --target armv7-unknown-linux-gnueabihf
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+    CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
+    CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++ \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig
+
+WORKDIR /src
+CMD ["cargo", "build", "--release", "--target", "armv7-unknown-linux-gnueabihf"]

@@ -28,7 +28,11 @@ pre-build = [
 # ── x86_64（Ubuntu 22.04 PC / 服务器）──────────────────────────────────────────
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+
+# ── armv7（玩客云 S805 armhf）──────────────────────────────────────────────
+[target.armv7-unknown-linux-gnueabihf]
 pre-build = [
+    "dpkg --add-architecture armhf",
     "apt-get update -qq",
-    "apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev libudev-dev",
+    "apt-get install -y --no-install-recommends pkg-config libasound2-dev:armhf libssl-dev:armhf libudev-dev:armhf",
 ]

@@ -6,7 +6,7 @@
 #   bash scripts/build-and-package.sh [选项]
 #
 # 选项：
-#   --server <IP或域名>   信令服务器地址（如 47.116.113.254 或 xu7-kvm.xyz），必填
+#   --server <IP或域名>   信令服务器地址（如 your-server.com 或公网 IP），必填
 #   --room   <房间ID>     设备房间 ID（默认：主机名）
 #   --port   <端口>       信令服务器端口（默认：8080）
 #   --install             打包完成后直接安装到本机并启动服务
@@ -14,8 +14,10 @@
 #   --help                显示帮助
 #
 # 示例：
-#   bash scripts/build-and-package.sh --server 47.116.113.254 --install
+#   bash scripts/build-and-package.sh --server <YOUR_SERVER_IP> --install
 #   bash scripts/build-and-package.sh --server my.server.com --room pi-living-room
+#
+# 提示：服务器 IP 统一在 deploy/env.example（复制为 env.sh 后填入真实值）中管理
 # =============================================================================
 set -eo pipefail
 
@@ -110,7 +112,7 @@ if [[ -z "$OPT_SERVER" ]]; then
     if [[ -t 0 ]]; then
         echo -e "${YELLOW}需要填写信令服务器信息（用于生成设备配置）${NC}"
         echo ""
-        read -rp "  信令服务器 IP 或域名（如 47.116.113.254）: " OPT_SERVER
+        read -rp "  信令服务器 IP 或域名（参考 deploy/env.example 中的 REMOTE_HOST）: " OPT_SERVER
         read -rp "  服务器端口 [默认: 8080]: " _port
         [[ -n "$_port" ]] && OPT_PORT="$_port"
         read -rp "  设备房间 ID [默认: $(hostname -s)]: " _room
