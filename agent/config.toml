@@ -1,5 +1,5 @@
 [signal]
-url     = "ws://47.86.7.158:8080/ws"
+url     = "ws://your-server:8080/ws"
 room_id = "test-room"
 
 [video]
@@ -31,6 +31,6 @@ stun_servers = [
     "stun:stun1.l.google.com:19302",
     "stun:stun.cloudflare.com:3478",
 ]
-# turn_url      = "turn:47.86.7.158:3478"
+# turn_url      = "turn:your-server:3478"
 # turn_username = "kvmuser"
 # turn_password = "change_me_in_production"

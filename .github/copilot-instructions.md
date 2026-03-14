@@ -20,13 +20,14 @@ Any-KVM 是一个**浏览器直访物理设备**的轻量级 KVM 控制平台。
 
 ## 典型工作流
 
-### 1. 部署信令服务器（公网机器，一次性）
+### 1. 部署信令服务器（公网机器，一键部署）
 
 ```bash
-cd deploy
-docker compose up -d
+# 修改 .github/skills/deploy-test/scripts/env.sh 中的 REMOTE_HOST / REMOTE_USER / REMOTE_PASS
+# 然后执行一键部署（本地构建 + scp + 远端自动配置）
+bash .github/skills/deploy-test/scripts/deploy-signal.sh
 # 信令服务器监听 :8080，coturn 监听 :3478
-curl http://47.86.7.158:8080/health   # → {"status":"ok","rooms":0}
+curl http://<YOUR_SERVER_IP>:8080/health   # → {"status":"ok","rooms":0}
 ```
 
 ### 2. 在被控设备上编译安装 Agent（每台设备一次）
@@ -52,7 +53,7 @@ sudo nano /etc/any-kvm-agent/config.toml
 
 ```toml
 [signal]
-url     = "ws://47.86.7.158:8080/ws"   # 信令服务器公网地址
+url     = "ws://<YOUR_SERVER_IP>:8080/ws"   # 信令服务器公网地址
 room_id = "my-device"                   # 任意唯一名称
 
 [hid]
@@ -68,8 +69,8 @@ sudo systemctl status any-kvm-agent   # 确认 active (running)
 
 ### 4. 浏览器访问
 
-打开 `http://47.86.7.158:8080`，页面自动显示在线设备列表，点击设备名称的「连接」按钮即可。
-无需手动填写房间 ID 或 STUN 服务器。
+打开 `http://<YOUR_SERVER_IP>:8080`（或域名 `http://xu7-kvm.xyz:8080`），页面自动显示在线设备列表，点击设备名称的「连接」按钮即可。
+STUN/TURN/信令地址均从浏览器 URL 自动推导，无需手动填写。
 
 ---
 

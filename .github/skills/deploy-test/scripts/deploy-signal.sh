@@ -1,96 +1,131 @@
 #!/usr/bin/env bash
-# deploy-signal.sh — 通过 scp 上传本地文件到远端，部署 signal-server + coturn
-# 流程：scp 上传必要文件 → 配置 coturn → docker build + docker-compose up
+# deploy-signal.sh — 一键部署 signal-server + coturn（无需 Docker）
+# 只需修改 env.sh 中的 REMOTE_HOST / REMOTE_USER / REMOTE_PASS，其余全自动。
+# 流程：本地构建 Go 二进制 → scp 上传 → apt 装 coturn → 自动配置 IP → systemd 启动
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
 REMOTE_DIR="/root/Any-KVM"
+SIGNAL_BIN="${REPO_ROOT}/signal/signal-server"
 
-echo "==> [1/4] 远端检查依赖（docker、docker-compose）"
-ssh_remote 'bash -s' << 'CHECK_DEPS'
+# ─── Step 0: 本地构建 signal-server 二进制 ──────────────────────────────────
+echo "==> [0/4] 本地构建 signal-server 二进制"
+if [[ -f "${SIGNAL_BIN}" ]]; then
+    echo "✓ 二进制已存在: $(ls -lh "${SIGNAL_BIN}" | awk '{print $5}')"
+    echo "  (如需重新构建，请先删除 ${SIGNAL_BIN})"
+else
+    echo "→ 使用 Docker 构建 signal-server（静态链接，linux/amd64）..."
+    docker run --rm -v "${REPO_ROOT}/signal":/src -w /src golang:1.21-alpine sh -c \
+        "go env -w GOPROXY=https://goproxy.cn,direct && CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o /src/signal-server ."
+    echo "✓ 构建完成: $(ls -lh "${SIGNAL_BIN}" | awk '{print $5}')"
+fi
+
+# ─── Step 1: 远端安装 coturn ─────────────────────────────────────────────────
+echo "==> [1/4] 远端安装依赖（coturn）"
+ssh_remote 'bash -s' << 'INSTALL_DEPS'
 set -e
-if ! command -v docker &> /dev/null; then
-    echo "→ 安装 Docker..."
-    export DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v turnserver &> /dev/null; then
+    echo "→ 安装 coturn..."
     apt-get update -qq
-    apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-        docker.io curl wget || {
-        curl -fsSL https://get.docker.com | sh
-    }
-    systemctl start docker || true
+    apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" coturn
+    echo "✓ coturn 已安装"
+else
+    echo "✓ coturn 已存在: $(turnserver --version 2>&1 | head -1)"
 fi
-if ! command -v docker-compose &> /dev/null; then
-    echo "→ 安装 docker-compose..."
-    apt-get install -y docker-compose 2>/dev/null || {
-        curl -fsSL -o /usr/local/bin/docker-compose \
-            "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)"
-        chmod +x /usr/local/bin/docker-compose
-    }
-fi
-echo "✓ docker $(docker --version | grep -oP '\d+\.\d+\.\d+')"
-echo "✓ docker-compose $(docker-compose version --short 2>/dev/null || docker-compose --version)"
-CHECK_DEPS
+# 确保 curl 可用
+command -v curl &> /dev/null || apt-get install -y curl
+INSTALL_DEPS
 
-echo "==> [2/4] 通过 scp 上传项目文件到远端"
-# 在远端创建目录结构
-ssh_remote "mkdir -p ${REMOTE_DIR}/{signal,deploy,web}"
+# ─── Step 2: scp 上传文件 ───────────────────────────────────────────────────
+echo "==> [2/4] 上传文件到远端"
+ssh_remote "mkdir -p ${REMOTE_DIR}/web"
 
-# 上传信令服务器源码
-scp_to_remote "${REPO_ROOT}/signal/go.mod" "${REMOTE_DIR}/signal/go.mod"
-scp_to_remote "${REPO_ROOT}/signal/go.sum" "${REMOTE_DIR}/signal/go.sum" 2>/dev/null || true
-scp_to_remote "${REPO_ROOT}/signal/main.go" "${REMOTE_DIR}/signal/main.go"
+# 上传 signal-server 二进制
+echo "  → signal-server 二进制..."
+scp_to_remote "${SIGNAL_BIN}" "${REMOTE_DIR}/signal-server"
+ssh_remote "chmod +x ${REMOTE_DIR}/signal-server"
 
-# 上传部署配置
-scp_to_remote "${REPO_ROOT}/deploy/docker-compose.yml" "${REMOTE_DIR}/deploy/docker-compose.yml"
-scp_to_remote "${REPO_ROOT}/deploy/Dockerfile.signal" "${REMOTE_DIR}/deploy/Dockerfile.signal"
-scp_to_remote "${REPO_ROOT}/deploy/coturn.conf" "${REMOTE_DIR}/deploy/coturn.conf"
+# 上传 coturn 配置模板
+echo "  → coturn.conf..."
+scp_to_remote "${REPO_ROOT}/deploy/coturn.conf" "${REMOTE_DIR}/coturn.conf"
 
-# 上传 Web 前端静态文件
+# 上传 Web 前端（地址从 window.location 自动推导，无需替换）
+echo "  → Web 静态文件..."
 scp_to_remote "${REPO_ROOT}/web/index.html" "${REMOTE_DIR}/web/index.html"
 scp_to_remote "${REPO_ROOT}/web/app.js" "${REMOTE_DIR}/web/app.js"
 scp_to_remote "${REPO_ROOT}/web/style.css" "${REMOTE_DIR}/web/style.css"
 
-echo "✓ 文件已上传到远端 ${REMOTE_DIR}"
+echo "✓ 文件上传完成"
 
-echo "==> [3/4] 远端配置 & docker-compose 启动"
-ssh_remote 'bash -s' << 'DEPLOY'
+# ─── Step 3: 远端配置并启动服务 ─────────────────────────────────────────────
+echo "==> [3/4] 远端配置并启动服务"
+# 将 REMOTE_HOST 传给远端脚本（作为 heredoc 变量注入）
+ssh_remote "DEPLOY_PUBLIC_IP=${REMOTE_HOST}" 'bash -s' << 'DEPLOY'
 set -e
-cd /root/Any-KVM/deploy
+REMOTE_DIR="/root/Any-KVM"
 
-# 配置 coturn（替换公网 IP 和密码）
-PUBLIC_IP=$(curl -s --max-time 10 ifconfig.me || curl -s --max-time 10 icanhazip.com || true)
-if [ -z "$PUBLIC_IP" ]; then
-    echo "⚠ 无法获取公网 IP，使用 hostname -I"
-    PUBLIC_IP=$(hostname -I | awk '{print $1}')
-fi
-
-# 仅在还未替换时才 sed（避免重复部署时覆盖）
-if grep -q "YOUR_PUBLIC_IP" coturn.conf 2>/dev/null; then
-    TURN_PASSWORD=$(openssl rand -base64 24 | tr -d "=+/" | cut -c1-20)
-    sed -i "s/YOUR_PUBLIC_IP/$PUBLIC_IP/g" coturn.conf
-    sed -i "s/CHANGE_ME_IN_PRODUCTION/$TURN_PASSWORD/g" coturn.conf
-    echo "✓ coturn.conf 已配置 (IP=$PUBLIC_IP)"
-else
-    echo "✓ coturn.conf 已有配置，跳过"
-fi
-
-# 停旧容器、启新容器
+# --- 停止旧服务 ---
+systemctl stop any-kvm-signal 2>/dev/null || true
+systemctl stop coturn 2>/dev/null || true
 docker rm -f any-kvm-signal any-kvm-coturn 2>/dev/null || true
-docker-compose down --remove-orphans 2>/dev/null || true
-docker-compose up -d --build
 
-sleep 5
+# --- 配置 coturn：自动填充公网 IP 和内网 IP ---
+PRIVATE_IP=$(hostname -I | awk '{print $1}')
+echo "  公网 IP: ${DEPLOY_PUBLIC_IP}, 内网 IP: ${PRIVATE_IP}"
 
-# 健康检查
+cp "${REMOTE_DIR}/coturn.conf" /etc/turnserver.conf
+sed -i "s|__PUBLIC_IP__|${DEPLOY_PUBLIC_IP}|g" /etc/turnserver.conf
+sed -i "s|__PRIVATE_IP__|${PRIVATE_IP}|g" /etc/turnserver.conf
+
+# 启用 coturn 服务
+echo 'TURNSERVER_ENABLED=1' > /etc/default/coturn
+systemctl enable coturn
+systemctl restart coturn
+echo "✓ coturn 已启动 (external-ip=${DEPLOY_PUBLIC_IP}/${PRIVATE_IP})"
+
+# --- 创建 signal-server systemd 服务 ---
+cat > /etc/systemd/system/any-kvm-signal.service << 'SERVICE'
+[Unit]
+Description=Any-KVM Signal Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/Any-KVM/signal-server -addr :8080 -web /root/Any-KVM/web
+WorkingDirectory=/root/Any-KVM
+Restart=always
+RestartSec=3
+Environment=TZ=Asia/Shanghai
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+systemctl daemon-reload
+systemctl enable any-kvm-signal
+systemctl restart any-kvm-signal
+echo "✓ signal-server 已启动"
+
+sleep 2
+
+# --- 健康检查 ---
 if curl -s --max-time 5 http://localhost:8080/health | grep -q "ok"; then
     echo "✓ 信令服务器运行正常"
+    curl -s http://localhost:8080/health
 else
-    echo "⚠ 信令服务器可能未就绪"
+    echo "⚠ 信令服务器可能未就绪，查看日志："
+    journalctl -u any-kvm-signal --no-pager -n 20
 fi
-docker-compose ps
+
+echo ""
+echo "--- 服务状态 ---"
+systemctl is-active any-kvm-signal && echo "  signal-server: running" || echo "  signal-server: NOT running"
+systemctl is-active coturn && echo "  coturn: running" || echo "  coturn: NOT running"
 DEPLOY
 
+# ─── Step 4: 本地验证 ──────────────────────────────────────────────────────
 echo "==> [4/4] 本地验证远端服务"
 for i in $(seq 1 10); do
     STATUS=$(curl -sf "http://${REMOTE_HOST}:${SIGNAL_PORT}/health" 2>/dev/null || echo 'NOT_READY')

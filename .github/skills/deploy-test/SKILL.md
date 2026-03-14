@@ -1,6 +1,6 @@
 ---
 name: deploy-test
-description: "Any-KVM 部署测试验证工作流。使用时机: 部署信令服务器到远端(47.86.7.158)、本机编译安装 agent 做端到端测试、验证 WebRTC 连通性、检查健康状态、排查连接失败。包含: 构建打包安装 agent、部署 signal-server、管理 systemd 服务、验证整个链路。"
+description: "Any-KVM 部署测试验证工作流。使用时机: 部署信令服务器到远端(47.116.113.254 / xu7-kvm.xyz)、本机编译安装 agent 做端到端测试、验证 WebRTC 连通性、检查健康状态、排查连接失败。包含: 构建打包安装 agent、部署 signal-server、管理 systemd 服务、验证整个链路。"
 argument-hint: "可选: deploy(仅部署服务端) | agent(仅编译安装agent) | verify(仅验证) | all(全流程)"
 ---
 
@@ -10,10 +10,10 @@ argument-hint: "可选: deploy(仅部署服务端) | agent(仅编译安装agent)
 
 | 组件 | 地址 | 说明 |
 |------|------|------|
-| 信令服务器 | 47.86.7.158:8080 | 远端，Docker 运行（参照 auto-deploy.yml） |
-| coturn TURN | 47.86.7.158:3478 | 远端，Docker 运行 |
+| 信令服务器 | 47.116.113.254:8080 | 远端，systemd 直接运行 |
+| coturn TURN | 47.116.113.254:3478 | 远端，apt 安装 coturn |
 | Agent | 本机 | `scripts/build-and-package.sh --install` 编译安装，systemd 管理 |
-| Web 控制台 | http://47.86.7.158:8080 | 静态文件由 signal 服务提供 |
+| Web 控制台 | http://47.116.113.254:8080 | 静态文件由 signal 服务提供 |
 
 凭据存放在 [scripts/env.sh](./scripts/env.sh)（已加入 .gitignore）。
 

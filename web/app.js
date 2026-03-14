@@ -15,17 +15,21 @@ const App = (() => {
 
     // ─── 内置 STUN 服务器列表（自动使用，无需用户填写）────────────────────────
     // 同时包含国际和国内友好节点，WebRTC 引擎会自动挑选最快的
+    // 自建 coturn 地址从 window.location.hostname 自动推导（与信令服务器同机部署）
+    const _host = window.location.hostname;
     const BUILTIN_STUN = [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun.cloudflare.com:3478' },
         { urls: 'stun:stun.miwifi.com:3478' },      // 小米，国内友好
-        { urls: 'stun:47.86.7.158:3478' },            // 自建 coturn STUN
-        { urls: 'turn:47.86.7.158:3478', username: 'kvmuser', credential: 'anykvm2026' },
+        { urls: `stun:${_host}:3478` },               // 自建 coturn STUN
+        { urls: `turn:${_host}:3478`, username: 'kvmuser', credential: 'anykvm2026' },
     ];
 
-    // 默认信令服务器（填写你的公网服务器地址，用户可在界面修改并自动记忆）
-    const DEFAULT_SIGNAL = 'ws://47.86.7.158:8080/ws';
+    // 默认信令服务器：自动从当前页面地址推导（无需硬编码 IP）
+    const _proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const _port = window.location.port ? `:${window.location.port}` : '';
+    const DEFAULT_SIGNAL = `${_proto}//${_host}${_port}/ws`;
     const LS_KEY_SERVER = 'anykvm_server_url';
 
     // ─── DOM 引用 ────────────────────────────────────────────────────────────
