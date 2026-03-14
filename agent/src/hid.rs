@@ -17,14 +17,22 @@ const TYPE_KEYBOARD:    u8 = 0x01;
 const TYPE_MOUSE_MOVE:  u8 = 0x02;
 const TYPE_MOUSE_BTN:   u8 = 0x03;
 const TYPE_MOUSE_WHEEL: u8 = 0x04;
+const TYPE_CONTROL:     u8 = 0x10;
 
-pub fn run(cfg: HidConfig, rx: Receiver<Bytes>) -> Result<()> {
+/// Video control command sent via DataChannel
+#[derive(Debug, Clone)]
+pub enum VideoControl {
+    ChangeResolution { width: u32, height: u32 },
+    ChangeFps { fps: u32 },
+}
+
+pub fn run(cfg: HidConfig, rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>) -> Result<()> {
     info!("hid: mode={}", cfg.mode);
 
     match cfg.mode.as_str() {
-        "gadget"  => run_gadget(cfg, rx),
+        "gadget"  => run_gadget(cfg, rx, video_ctrl_tx),
         #[cfg(feature = "ch9329")]
-        "ch9329"  => run_ch9329(cfg, rx),
+        "ch9329"  => run_ch9329(cfg, rx, video_ctrl_tx),
         #[cfg(not(feature = "ch9329"))]
         "ch9329"  => bail!("ch9329 support not compiled in; rebuild with --features ch9329"),
         other     => bail!("unknown hid mode: '{}'", other),
@@ -33,7 +41,7 @@ pub fn run(cfg: HidConfig, rx: Receiver<Bytes>) -> Result<()> {
 
 // ─── USB HID Gadget 模式 ──────────────────────────────────────────────────────
 
-fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
+fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>) -> Result<()> {
     use std::io::Write;
     use std::fs::OpenOptions;
 
@@ -45,6 +53,11 @@ fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
         .with_context(|| format!("cannot open mouse gadget {:?}", cfg.mouse_device))?;
 
     info!("hid: USB Gadget keyboard={:?} mouse={:?}", cfg.keyboard_device, cfg.mouse_device);
+
+    // Track last known mouse position to avoid cursor jumps on button/wheel events
+    let mut last_x: u16 = 0x3fff;
+    let mut last_y: u16 = 0x3fff;
+    let mut last_buttons: u8 = 0;
 
     while let Some(frame) = rx.blocking_recv() {
         if frame.len() < 8 {
@@ -58,26 +71,55 @@ fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
                 // [modifier, reserved, key1..key6]
                 let report = [frame[1], 0x00, frame[2], frame[3],
                               frame[4], frame[5], frame[6], frame[7]];
-                kbd.write_all(&report).context("kbd write error")?;
+                if let Err(e) = kbd.write_all(&report) {
+                    warn!("hid: kbd write error: {e}");
+                }
             }
             TYPE_MOUSE_MOVE => {
                 // 绝对鼠标报文（需 USB Descriptor 为 Absolute Mouse）
                 // [buttons, abs_x_hi, abs_x_lo, abs_y_hi, abs_y_lo, wheel]
-                let buttons = frame[1];
-                let ax = u16::from_be_bytes([frame[2], frame[3]]);
-                let ay = u16::from_be_bytes([frame[4], frame[5]]);
-                let report = make_abs_mouse_report(buttons, ax, ay, 0);
-                mouse.write_all(&report).context("mouse write error")?;
+                last_buttons = frame[1];
+                last_x = u16::from_be_bytes([frame[2], frame[3]]);
+                last_y = u16::from_be_bytes([frame[4], frame[5]]);
+                let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
+                if let Err(e) = mouse.write_all(&report) {
+                    warn!("hid: mouse write error: {e}");
+                }
             }
             TYPE_MOUSE_BTN => {
-                let buttons = frame[1];
-                let report = make_abs_mouse_report(buttons, 0x3fff, 0x3fff, 0);
-                mouse.write_all(&report).context("mouse btn write error")?;
+                last_buttons = frame[1];
+                let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
+                if let Err(e) = mouse.write_all(&report) {
+                    warn!("hid: mouse btn write error: {e}");
+                }
             }
             TYPE_MOUSE_WHEEL => {
                 let delta = frame[1] as i8;
-                let report = make_abs_mouse_report(0, 0x3fff, 0x3fff, delta);
-                mouse.write_all(&report).context("mouse wheel write error")?;
+                let report = make_abs_mouse_report(last_buttons, last_x, last_y, delta);
+                if let Err(e) = mouse.write_all(&report) {
+                    warn!("hid: mouse wheel write error: {e}");
+                }
+            }
+            TYPE_CONTROL => {
+                // Video control message
+                if let Some(ref tx) = video_ctrl_tx {
+                    match frame[1] {
+                        0x01 => {
+                            // Resolution change: [0x10, 0x01, w_hi, w_lo, h_hi, h_lo, 0, 0]
+                            let w = u16::from_be_bytes([frame[2], frame[3]]) as u32;
+                            let h = u16::from_be_bytes([frame[4], frame[5]]) as u32;
+                            info!("hid: control → resolution change {}×{}", w, h);
+                            let _ = tx.send(VideoControl::ChangeResolution { width: w, height: h });
+                        }
+                        0x02 => {
+                            // FPS change: [0x10, 0x02, fps, 0, 0, 0, 0, 0]
+                            let fps = frame[2] as u32;
+                            info!("hid: control → fps change {}", fps);
+                            let _ = tx.send(VideoControl::ChangeFps { fps });
+                        }
+                        sub => debug!("hid: unknown control subtype 0x{:02x}", sub),
+                    }
+                }
             }
             other => debug!("hid: unknown frame type 0x{:02x}", other),
         }
@@ -101,7 +143,7 @@ fn make_abs_mouse_report(buttons: u8, x: u16, y: u16, wheel: i8) -> [u8; 6] {
 // ─── CH9329 串口 HID 模式（回退方案）─────────────────────────────────────────
 
 #[cfg(feature = "ch9329")]
-fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
+fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>) -> Result<()> {
     use serialport::SerialPort;
 
     let mut port = serialport::new(&cfg.serial_port, cfg.serial_baud)
@@ -111,24 +153,46 @@ fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>) -> Result<()> {
 
     info!("hid: CH9329 via {} @{}baud", cfg.serial_port, cfg.serial_baud);
 
+    let mut last_x: u16 = 0x3fff;
+    let mut last_y: u16 = 0x3fff;
+
     while let Some(frame) = rx.blocking_recv() {
         if frame.len() < 8 { continue; }
         let ty = frame[0];
         let packet = match ty {
             TYPE_KEYBOARD => {
-                // CH9329 键盘协议帧
                 ch9329_keyboard(frame[1], &frame[2..8])
             }
-            TYPE_MOUSE_MOVE | TYPE_MOUSE_BTN | TYPE_MOUSE_WHEEL => {
-                // CH9329 绝对鼠标协议帧
-                let buttons = if ty == TYPE_MOUSE_BTN { frame[1] } else { 0 };
-                let ax = if ty == TYPE_MOUSE_MOVE {
-                    u16::from_be_bytes([frame[2], frame[3]])
-                } else { 0x3fff };
-                let ay = if ty == TYPE_MOUSE_MOVE {
-                    u16::from_be_bytes([frame[4], frame[5]])
-                } else { 0x3fff };
-                ch9329_abs_mouse(buttons, ax, ay)
+            TYPE_MOUSE_MOVE => {
+                last_x = u16::from_be_bytes([frame[2], frame[3]]);
+                last_y = u16::from_be_bytes([frame[4], frame[5]]);
+                ch9329_abs_mouse(frame[1], last_x, last_y)
+            }
+            TYPE_MOUSE_BTN => {
+                ch9329_abs_mouse(frame[1], last_x, last_y)
+            }
+            TYPE_MOUSE_WHEEL => {
+                // CH9329 wheel not directly supported in abs mouse command
+                ch9329_abs_mouse(0, last_x, last_y)
+            }
+            TYPE_CONTROL => {
+                if let Some(ref tx) = video_ctrl_tx {
+                    match frame[1] {
+                        0x01 => {
+                            let w = u16::from_be_bytes([frame[2], frame[3]]) as u32;
+                            let h = u16::from_be_bytes([frame[4], frame[5]]) as u32;
+                            info!("hid: control → resolution change {}×{}", w, h);
+                            let _ = tx.send(VideoControl::ChangeResolution { width: w, height: h });
+                        }
+                        0x02 => {
+                            let fps = frame[2] as u32;
+                            info!("hid: control → fps change {}", fps);
+                            let _ = tx.send(VideoControl::ChangeFps { fps });
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
             }
             _ => continue,
         };

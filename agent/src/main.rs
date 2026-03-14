@@ -35,10 +35,14 @@ async fn main() -> Result<()> {
     // 如果配置的源（默认 v4l2）失败，自动回退到屏幕截图
     let (video_tx, video_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
     let keyframe_flag = Arc::new(AtomicBool::new(false));
+
+    // 视频控制通道（分辨率/帧率运行时切换）
+    let (video_ctrl_tx, video_ctrl_rx) = std::sync::mpsc::channel::<hid::VideoControl>();
+
     let video_cfg = cfg.video.clone();
     let kf_flag = keyframe_flag.clone();
     tokio::task::spawn_blocking(move || {
-        match video::run(video_cfg.clone(), video_tx.clone(), kf_flag.clone()) {
+        match video::run_with_ctrl(video_cfg.clone(), video_tx.clone(), kf_flag.clone(), Some(video_ctrl_rx)) {
             Ok(()) => {}
             Err(e) => {
                 error!("video module error: {:#}", e);
@@ -70,7 +74,7 @@ async fn main() -> Result<()> {
     let (hid_tx, hid_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
     let hid_cfg = cfg.hid.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = hid::run(hid_cfg, hid_rx) {
+        if let Err(e) = hid::run(hid_cfg, hid_rx, Some(video_ctrl_tx)) {
             error!("hid module error: {:#}", e);
         }
     });
@@ -121,10 +125,12 @@ async fn main() -> Result<()> {
         let hid_tx_this = hid_tx.clone();
 
         let ice_cfg = cfg.ice.clone();
+        let video_fps = cfg.video.fps;
         let kf = keyframe_flag.clone();
         let webrtc_handle = tokio::spawn(async move {
             if let Err(e) = webrtc::run(
                 ice_cfg,
+                video_fps,
                 video_rx_this,
                 audio_rx_this,
                 hid_tx_this,
@@ -154,6 +160,7 @@ async fn main() -> Result<()> {
         let signal_abort = signal_handle.abort_handle();
 
         info!("reconnect: starting new session");
+        let session_start = std::time::Instant::now();
 
         tokio::select! {
             _ = webrtc_handle  => {
@@ -172,8 +179,14 @@ async fn main() -> Result<()> {
             }
         }
 
+        // 若会话持续超过 10s，视为成功，重置退避延迟
+        if session_start.elapsed() > Duration::from_secs(10) {
+            reconnect_delay = Duration::from_secs(3);
+        } else {
+            // 指数退避：3s → 5s → 8s → … 最多 30s
+            reconnect_delay = (reconnect_delay * 3 / 2).min(Duration::from_secs(30));
+        }
+
         tokio::time::sleep(reconnect_delay).await;
-        // 退避：首次 3s，逐步增加到最多 30s
-        reconnect_delay = (reconnect_delay + Duration::from_secs(2)).min(Duration::from_secs(30));
     }
 }

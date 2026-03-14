@@ -428,6 +428,30 @@ body {
   background: rgba(224, 85, 85, .08);
 }
 
+/* 设置下拉框 */
+.sel-tool {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  padding: 3px 6px;
+  font-size: .78rem;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: border-color .15s;
+  outline: none;
+  appearance: auto;
+}
+
+.sel-tool:hover {
+  border-color: var(--accent);
+}
+
+.sel-tool:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 142, 247, .15);
+}
+
 /* 视频区域 */
 #video-container {
   flex: 1;

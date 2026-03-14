@@ -26,6 +26,7 @@ use tracing::{info, warn, debug};
 
 pub async fn run(
     ice_cfg:              IceConfig,
+    video_fps:            u32,
     mut video_rx:         broadcast::Receiver<Bytes>,
     mut audio_rx:         broadcast::Receiver<Bytes>,
     hid_tx:               Sender<Bytes>,
@@ -138,7 +139,8 @@ pub async fn run(
     let mut turn_refresh_at = Instant::now() + Duration::from_secs(240); // TURN refresh
     let mut video_ts:  u32 = 0;
     let mut audio_ts:  u32 = 0;
-    let frame_dur_90k = 90000 / 15u32;
+    let fps = if video_fps > 0 { video_fps } else { 15 };
+    let frame_dur_90k = 90000 / fps;
     let audio_dur_90k = 960u32; // Opus: 20ms @ 48kHz = 960 samples
     let mut buf = vec![0u8; 65536];
     let mut video_frame_count: u64 = 0;
@@ -189,12 +191,12 @@ pub async fn run(
                 Ok(frame) => {
                     video_frame_count += 1;
                     if video_frame_count == 1 {
-                        info!("webrtc: first video frame received ({} bytes), NAL types: {}",
+                        debug!("webrtc: first video frame ({} bytes), NAL types: {}",
                             frame.len(), describe_h264_nals(&frame));
                     }
                     send_video(&mut rtc, video_mid, &frame, video_ts, &mut video_write_count, &mut video_drop_count);
                     video_ts = video_ts.wrapping_add(frame_dur_90k);
-                    if video_frame_count % 150 == 0 {
+                    if video_frame_count % 300 == 0 {
                         info!("webrtc: video stats — received={}, written={}, dropped={}, udp_tx={}",
                             video_frame_count, video_write_count, video_drop_count, transmit_count);
                     }
@@ -223,7 +225,7 @@ pub async fn run(
         }
 
         // 轮询 str0m 输出 — 循环 poll 直到 Timeout，一次性发完所有排队的包
-        let mut timeout = Instant::now();
+        let timeout;
         loop {
             match rtc.poll_output()? {
                 Output::Timeout(t) => {
@@ -232,18 +234,6 @@ pub async fn run(
                 }
                 Output::Transmit(send) => {
                     transmit_count += 1;
-                    if transmit_count <= 10 {
-                        let b = &send.contents;
-                        let ptype = if b.len() > 1 && (b[0] & 0xC0) == 0x80 {
-                            format!("RTP pt={} seq={} ts={} ssrc={}", b[1] & 0x7F,
-                                u16::from_be_bytes([b[2], b[3]]),
-                                u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
-                                u32::from_be_bytes([b[8], b[9], b[10], b[11]]))
-                        } else {
-                            format!("non-RTP first_byte=0x{:02x}", b[0])
-                        };
-                        info!("webrtc: Transmit #{} ({} bytes to {} via {}) {}", transmit_count, b.len(), send.destination, send.source, ptype);
-                    }
                     // 如果源地址是 relay 地址，通过 TURN Send indication 发送
                     if let (Some(raddr), Some(ref ts)) = (relay_addr, &turn_state) {
                         if send.source == raddr {
@@ -340,14 +330,8 @@ fn send_video(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32, write_count: &mut u
         return;
     };
     *write_count += 1;
-    if *write_count <= 5 {
-        let hex_prefix: String = data.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        info!("webrtc: send_video — frame #{} ({} bytes, mid={}, pt={}, ts={}) hex: {}",
-            write_count, data.len(), mid, pt, ts, hex_prefix);
-        info!("webrtc: send_video — frame #{} NAL types: {}", write_count, describe_h264_nals(data));
-    }
     if let Err(e) = writer.write(pt, Instant::now(), MediaTime::from_90khz(ts as i64), data.to_vec()) {
-        if *write_count <= 5 || *write_count % 100 == 0 {
+        if *write_count <= 5 || *write_count % 300 == 0 {
             warn!("webrtc: send_video — write error: {} (count={})", e, write_count);
         }
     }
@@ -396,7 +380,7 @@ async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut 
             keyframe_flag.store(true, Ordering::Relaxed);
         }
         other => {
-            info!("webrtc event: {:?}", other);
+            debug!("webrtc event: {:?}", other);
         }
     }
     false

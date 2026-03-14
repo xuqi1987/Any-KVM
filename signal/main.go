@@ -68,6 +68,7 @@ func (r *room) clear(role string) {
 // 设备端的 offer 会被缓存，客户端稍后连接时自动回放。
 func (r *room) forward(fromRole string, msg []byte) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	// 缓存设备端 offer，以便客户端稍后连接时能收到
 	if fromRole == "device" {
@@ -84,11 +85,13 @@ func (r *room) forward(fromRole string, msg []byte) {
 	} else {
 		target = r.device
 	}
-	r.mu.Unlock()
 
 	if target == nil {
 		return
 	}
+	// Hold the lock while sending to avoid a race where close(target.send)
+	// runs between our nil check and the channel send (TOCTOU).
+	// writePump never acquires room.mu, so this cannot deadlock.
 	select {
 	case target.send <- msg:
 	default:
@@ -237,8 +240,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	defer func() {
-		close(p.send)
+		// Clear the peer from the room first (while holding room.mu),
+		// so that concurrent forward() calls will see nil target and skip.
+		// Only then close the send channel to avoid send-on-closed-channel panic.
 		rm.clear(role)
+		close(p.send)
 		tryDelete(roomID)
 		log.Printf("room[%s] %s disconnected", roomID, role)
 	}()

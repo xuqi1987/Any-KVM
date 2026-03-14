@@ -59,6 +59,11 @@ pub fn run(cfg: AudioConfig, tx: Sender<Bytes>) -> Result<()> {
             0
         });
         if read == 0 { continue; }
+        // Zero out any unread portion to prevent stale data from previous iteration
+        let filled = read * cfg.channels as usize;
+        if filled < pcm_buf.len() {
+            pcm_buf[filled..].fill(0);
+        }
 
         // Opus 编码（输入 i16 切片，输出 opus_buf）
         let len = encoder

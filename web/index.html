@@ -62,6 +62,21 @@
       <div class="spacer"></div>
       <button class="btn-tool" onclick="App.toggleFullscreen()" title="全屏 (F11)">⛶</button>
       <button class="btn-tool" id="btn-audio" onclick="App.toggleAudio()" title="音频开关">🔇</button>
+      <select id="sel-resolution" class="sel-tool" title="分辨率" onchange="App.changeResolution(this.value)">
+        <option value="">分辨率</option>
+        <option value="640x480">640×480</option>
+        <option value="1024x768">1024×768</option>
+        <option value="1280x720" selected>1280×720</option>
+        <option value="1920x1080">1920×1080</option>
+      </select>
+      <select id="sel-fps" class="sel-tool" title="帧率" onchange="App.changeFps(this.value)">
+        <option value="">帧率</option>
+        <option value="5">5 fps</option>
+        <option value="10">10 fps</option>
+        <option value="15" selected>15 fps</option>
+        <option value="24">24 fps</option>
+        <option value="30">30 fps</option>
+      </select>
       <button class="btn-tool" onclick="App.sendCtrlAltDel()" title="发送 Ctrl+Alt+Del">⌨ CAD</button>
       <button class="btn-tool btn-danger" onclick="App.disconnect()" title="断开连接">✕ 断开</button>
     </div>

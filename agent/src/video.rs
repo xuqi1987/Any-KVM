@@ -26,48 +26,120 @@ use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
 #[cfg(feature = "v4l2-capture")]
 use v4l::{Device, FourCC};
-pub fn run(cfg: VideoConfig, tx: Sender<Bytes>, keyframe_flag: Arc<AtomicBool>) -> Result<()> {
-    match cfg.source.as_str() {
-        "screen" => {
-            #[cfg(feature = "screen-capture")]
-            {
-                info!("video: source=screen (desktop capture)");
-                return run_screen_capture(&cfg, &tx, &keyframe_flag);
-            }
-            #[cfg(not(feature = "screen-capture"))]
-            bail!(
-                "video source \"screen\" requires the 'screen-capture' feature; \
-                 rebuild with: cargo build --release --features screen-capture"
-            );
-        }
-        _ => {
-            #[cfg(feature = "v4l2-capture")]
-            {
-                info!(
-                    "video: source=v4l2  opening {} ({}×{}@{}fps, target {}kbps)",
-                    cfg.device.display(), cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps
-                );
-                let dev = Device::with_path(&cfg.device)
-                    .with_context(|| format!("cannot open V4L2 device {:?}", cfg.device))?;
 
-                let hw_ok = cfg.hw_encode && try_hw_h264(&dev, &cfg, &tx).is_ok();
-                if !hw_ok {
-                    warn!("video: hardware H.264 not available, falling back to openh264");
-                    if let Err(e) = run_sw_h264(&dev, &cfg, &tx, &keyframe_flag) {
-                        warn!("video: YUYV capture failed: {e}, trying MJPEG");
-                        run_mjpeg_h264(&dev, &cfg, &tx, &keyframe_flag)?;
-                    }
+/// Check for pending video control messages. Returns true if a restart is needed.
+fn check_video_ctrl(
+    ctrl_rx: &Option<std::sync::mpsc::Receiver<crate::hid::VideoControl>>,
+    cfg: &mut VideoConfig,
+) -> bool {
+    let rx = match ctrl_rx {
+        Some(rx) => rx,
+        None => return false,
+    };
+    let mut restart = false;
+    while let Ok(cmd) = rx.try_recv() {
+        match cmd {
+            crate::hid::VideoControl::ChangeResolution { width, height } => {
+                if width != cfg.width || height != cfg.height {
+                    info!("video: control → resolution {}×{}", width, height);
+                    cfg.width = width;
+                    cfg.height = height;
+                    restart = true;
                 }
             }
-            #[cfg(not(feature = "v4l2-capture"))]
-            bail!(
-                "video source \"v4l2\" requires the 'v4l2-capture' feature; \
-                 rebuild with: cargo build --release --features v4l2-capture"
-            );
+            crate::hid::VideoControl::ChangeFps { fps } => {
+                if fps != cfg.fps {
+                    info!("video: control → fps {}", fps);
+                    cfg.fps = fps;
+                    restart = true;
+                }
+            }
         }
     }
-    #[allow(unreachable_code)]
-    Ok(())
+    restart
+}
+
+pub fn run(cfg: VideoConfig, tx: Sender<Bytes>, keyframe_flag: Arc<AtomicBool>) -> Result<()> {
+    run_with_ctrl(cfg, tx, keyframe_flag, None)
+}
+
+pub fn run_with_ctrl(
+    mut cfg: VideoConfig, tx: Sender<Bytes>, keyframe_flag: Arc<AtomicBool>,
+    ctrl_rx: Option<std::sync::mpsc::Receiver<crate::hid::VideoControl>>,
+) -> Result<()> {
+    loop {
+        let result = match cfg.source.as_str() {
+            "screen" => {
+                #[cfg(feature = "screen-capture")]
+                {
+                    info!("video: source=screen (desktop capture)");
+                    run_screen_capture(&cfg, &tx, &keyframe_flag, &ctrl_rx)
+                }
+                #[cfg(not(feature = "screen-capture"))]
+                bail!(
+                    "video source \"screen\" requires the 'screen-capture' feature; \
+                     rebuild with: cargo build --release --features screen-capture"
+                );
+            }
+            _ => {
+                #[cfg(feature = "v4l2-capture")]
+                {
+                    info!(
+                        "video: source=v4l2  opening {} ({}×{}@{}fps, target {}kbps)",
+                        cfg.device.display(), cfg.width, cfg.height, cfg.fps, cfg.bitrate_kbps
+                    );
+                    let dev = Device::with_path(&cfg.device)
+                        .with_context(|| format!("cannot open V4L2 device {:?}", cfg.device))?;
+
+                    let hw_ok = cfg.hw_encode && try_hw_h264(&dev, &cfg, &tx).is_ok();
+                    if !hw_ok {
+                        warn!("video: hardware H.264 not available, falling back to openh264");
+                        if let Err(e) = run_sw_h264(&dev, &cfg, &tx, &keyframe_flag, &ctrl_rx) {
+                            warn!("video: YUYV capture failed: {e}, trying MJPEG");
+                            run_mjpeg_h264(&dev, &cfg, &tx, &keyframe_flag, &ctrl_rx)
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
+                #[cfg(not(feature = "v4l2-capture"))]
+                bail!(
+                    "video source \"v4l2\" requires the 'v4l2-capture' feature; \
+                     rebuild with: cargo build --release --features v4l2-capture"
+                );
+            }
+        };
+
+        // If we get a RestartNeeded result, update config and loop
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                if msg.contains("video_restart") {
+                    // Restart was requested — config already updated via check_video_ctrl
+                    info!("video: restarting with new settings");
+                    // Drain any remaining control messages to get latest config
+                    if let Some(ref rx) = ctrl_rx {
+                        while let Ok(cmd) = rx.try_recv() {
+                            match cmd {
+                                crate::hid::VideoControl::ChangeResolution { width, height } => {
+                                    cfg.width = width;
+                                    cfg.height = height;
+                                }
+                                crate::hid::VideoControl::ChangeFps { fps } => {
+                                    cfg.fps = fps;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 // ─── 硬件 H.264（V4L2 直接输出 H.264，典型于 Amlogic / Rockchip）────────────
@@ -105,7 +177,7 @@ fn try_hw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
 // ─── 软件 H.264（YUYV → openh264）──────────────────────────────────────────
 
 #[cfg(feature = "v4l2-capture")]
-fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {
+fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>, ctrl_rx: &Option<std::sync::mpsc::Receiver<crate::hid::VideoControl>>) -> Result<()> {
     let mut fmt = dev.format()?;
     fmt.width  = cfg.width;
     fmt.height = cfg.height;
@@ -132,12 +204,12 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
         .context("failed to init openh264 encoder")?;
     let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)?;
 
-    // Debug: save first 30 frames to /tmp/debug_video.h264 for offline validation
-    let mut debug_file: Option<std::fs::File> = std::fs::File::create("/tmp/debug_video.h264").ok();
-    let mut frame_count = 0u32;
-
+    let mut cfg_mut = cfg.clone();
     loop {
         let (buf, _meta) = stream.next()?;
+        if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
+            bail!("video_restart: settings changed");
+        }
         if keyframe_flag.swap(false, Ordering::Relaxed) {
             encoder.force_intra_frame();
             debug!("video: forcing IDR frame (keyframe requested)");
@@ -147,17 +219,6 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
         let bitstream = encoder.encode(&src).context("openh264 encode error")?;
         let encoded = Bytes::from(bitstream.to_vec());
         if !encoded.is_empty() {
-            frame_count += 1;
-            if let Some(ref mut f) = debug_file {
-                if frame_count <= 30 {
-                    use std::io::Write;
-                    let _ = f.write_all(&encoded);
-                    if frame_count == 30 {
-                        info!("video: saved 30 frames to /tmp/debug_video.h264");
-                        debug_file = None;
-                    }
-                }
-            }
             if tx.blocking_send(encoded).is_err() {
                 return Ok(());
             }
@@ -168,7 +229,7 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
 // ─── 软件 H.264（MJPEG → decode JPEG → openh264）────────────────────────────
 
 #[cfg(feature = "v4l2-capture")]
-fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {
+fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>, ctrl_rx: &Option<std::sync::mpsc::Receiver<crate::hid::VideoControl>>) -> Result<()> {
     let mut fmt = dev.format()?;
     fmt.width  = cfg.width;
     fmt.height = cfg.height;
@@ -195,8 +256,12 @@ fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_
         .context("failed to init openh264 encoder")?;
     let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)?;
 
+    let mut cfg_mut = cfg.clone();
     loop {
         let (buf, _meta) = stream.next()?;
+        if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
+            bail!("video_restart: settings changed");
+        }
         if keyframe_flag.swap(false, Ordering::Relaxed) {
             encoder.force_intra_frame();
             debug!("video: forcing IDR frame (keyframe requested)");
@@ -236,20 +301,27 @@ fn mjpeg_to_yuv420(jpeg_data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
 
     let pixel_format = info.pixel_format;
     let bytes_per_pixel = match pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => 3,
-        jpeg_decoder::PixelFormat::L8    => 1,
+        jpeg_decoder::PixelFormat::RGB24  => 3,
+        jpeg_decoder::PixelFormat::L8     => 1,
         jpeg_decoder::PixelFormat::CMYK32 => 4,
         _ => bail!("unsupported JPEG pixel format: {:?}", pixel_format),
     };
 
-    let scale_x = src_w as f32 / w as f32;
-    let scale_y = src_h as f32 / h as f32;
+    // Validate decoded dimensions
+    let expected = src_w * src_h * bytes_per_pixel;
+    if pixels.len() < expected {
+        bail!("JPEG decoded buffer too small: got {} bytes, expected {}", pixels.len(), expected);
+    }
+
+    // Use fixed-point integer scaling (16.16) for performance on ARM
+    let scale_x = if w > 1 { ((src_w - 1) << 16) / (w - 1) } else { 0 };
+    let scale_y = if h > 1 { ((src_h - 1) << 16) / (h - 1) } else { 0 };
 
     // Y plane
     for dy in 0..h {
-        let sy = (dy as f32 * scale_y) as usize;
+        let sy = ((dy * scale_y) >> 16).min(src_h - 1);
         for dx in 0..w {
-            let sx = (dx as f32 * scale_x) as usize;
+            let sx = ((dx * scale_x) >> 16).min(src_w - 1);
             let i = (sy * src_w + sx) * bytes_per_pixel;
             let (r, g, b) = match pixel_format {
                 jpeg_decoder::PixelFormat::RGB24 => (pixels[i] as i32, pixels[i+1] as i32, pixels[i+2] as i32),
@@ -263,9 +335,9 @@ fn mjpeg_to_yuv420(jpeg_data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
     // U/V planes
     let uv_start = frame_size;
     for dy in (0..h).step_by(2) {
-        let sy = (dy as f32 * scale_y) as usize;
+        let sy = ((dy * scale_y) >> 16).min(src_h - 1);
         for dx in (0..w).step_by(2) {
-            let sx = (dx as f32 * scale_x) as usize;
+            let sx = ((dx * scale_x) >> 16).min(src_w - 1);
             let i = (sy * src_w + sx) * bytes_per_pixel;
             let (r, g, b) = match pixel_format {
                 jpeg_decoder::PixelFormat::RGB24 => (pixels[i] as i32, pixels[i+1] as i32, pixels[i+2] as i32),
@@ -285,7 +357,7 @@ fn mjpeg_to_yuv420(jpeg_data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
 
 
 #[cfg(feature = "screen-capture")]
-fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {
+fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>, ctrl_rx: &Option<std::sync::mpsc::Receiver<crate::hid::VideoControl>>) -> Result<()> {
     use scrap::{Capturer, Display};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -316,8 +388,13 @@ fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc
 
     let frame_interval = Duration::from_nanos(1_000_000_000 / cfg.fps as u64);
     let mut next_frame = Instant::now();
+    let mut cfg_mut = cfg.clone();
 
     loop {
+        // Check for control messages
+        if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
+            bail!("video_restart: settings changed");
+        }
         match capturer.frame() {
             Ok(raw) => {
                 // raw: BGRA，stride = raw.len() / disp_h
@@ -354,6 +431,7 @@ fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc
 /// BGRA → YUV420 平面（BT.601 limited range）
 /// src_w/src_h：原图尺寸（scrap 抓取的分辨率）
 /// dst_w/dst_h：输出编码尺寸（若与原图不同则做最近邻缩放）
+/// 使用 16.16 定点数缩放，ARM 友好
 #[cfg(feature = "screen-capture")]
 fn bgra_to_yuv420(
     frame: &[u8], stride: usize,
@@ -363,35 +441,41 @@ fn bgra_to_yuv420(
     let frame_size = dst_w * dst_h;
     let mut yuv = vec![0u8; frame_size * 3 / 2];
 
-    let scale_x = src_w as f32 / dst_w as f32;
-    let scale_y = src_h as f32 / dst_h as f32;
+    // Fixed-point 16.16 scaling (matching MJPEG path)
+    let scale_x = if dst_w > 1 { ((src_w - 1) << 16) / (dst_w - 1) } else { 0 };
+    let scale_y = if dst_h > 1 { ((src_h - 1) << 16) / (dst_h - 1) } else { 0 };
 
+    // Y plane
     for dy in 0..dst_h {
-        let sy = (dy as f32 * scale_y) as usize;
+        let sy = ((dy * scale_y) >> 16).min(src_h - 1);
+        let row_off = sy * stride;
+        let y_off = dy * dst_w;
         for dx in 0..dst_w {
-            let sx = (dx as f32 * scale_x) as usize;
-            let i = sy * stride + sx * 4;
+            let sx = ((dx * scale_x) >> 16).min(src_w - 1);
+            let i = row_off + sx * 4;
             let b = frame[i]     as i32;
             let g = frame[i + 1] as i32;
             let r = frame[i + 2] as i32;
-            // Y
             let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-            yuv[dy * dst_w + dx] = y.clamp(0, 255) as u8;
+            yuv[y_off + dx] = y.clamp(0, 255) as u8;
         }
     }
     // U / V（4:2:0）
     let uv_start = frame_size;
+    let uv_w = dst_w / 2;
     for dy in (0..dst_h).step_by(2) {
-        let sy = (dy as f32 * scale_y) as usize;
+        let sy = ((dy * scale_y) >> 16).min(src_h - 1);
+        let row_off = sy * stride;
+        let uv_row = (dy / 2) * uv_w;
         for dx in (0..dst_w).step_by(2) {
-            let sx = (dx as f32 * scale_x) as usize;
-            let i = sy * stride + sx * 4;
+            let sx = ((dx * scale_x) >> 16).min(src_w - 1);
+            let i = row_off + sx * 4;
             let b = frame[i]     as i32;
             let g = frame[i + 1] as i32;
             let r = frame[i + 2] as i32;
             let u = ((-38 * r -  74 * g + 112 * b + 128) >> 8) + 128;
             let v = ((112 * r -  94 * g -  18 * b + 128) >> 8) + 128;
-            let idx = (dy / 2) * (dst_w / 2) + dx / 2;
+            let idx = uv_row + dx / 2;
             yuv[uv_start + idx] = u.clamp(0, 255) as u8;
             yuv[uv_start + frame_size / 4 + idx] = v.clamp(0, 255) as u8;
         }

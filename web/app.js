@@ -206,10 +206,10 @@ const App = (() => {
     // ─── 键码转 HID Usage ID（USB HID Keyboard Usage Page 0x07）─────────────
     // 覆盖常用键；完整映射可按需扩展
     const KEY_MAP = {
-        'KeyA': 4, 'KeyB': 5, 'KeyC': 6, 'KeyD': 7, 'KeyE': 8, 'KeyF': 9, 'KeyG': 10, 'KeyH': 11,
-        'KeyI': 18, 'KeyJ': 19, 'KeyK': 20, 'KeyL': 21, 'KeyM': 22, 'KeyN': 23, 'KeyO': 24, 'KeyP': 25,
-        'KeyQ': 26, 'KeyR': 27, 'KeyS': 28, 'KeyT': 29, 'KeyU': 30, 'KeyV': 31, 'KeyW': 32, 'KeyX': 33,
-        'KeyY': 34, 'KeyZ': 35,
+        'KeyA': 0x04, 'KeyB': 0x05, 'KeyC': 0x06, 'KeyD': 0x07, 'KeyE': 0x08, 'KeyF': 0x09, 'KeyG': 0x0A, 'KeyH': 0x0B,
+        'KeyI': 0x0C, 'KeyJ': 0x0D, 'KeyK': 0x0E, 'KeyL': 0x0F, 'KeyM': 0x10, 'KeyN': 0x11, 'KeyO': 0x12, 'KeyP': 0x13,
+        'KeyQ': 0x14, 'KeyR': 0x15, 'KeyS': 0x16, 'KeyT': 0x17, 'KeyU': 0x18, 'KeyV': 0x19, 'KeyW': 0x1A, 'KeyX': 0x1B,
+        'KeyY': 0x1C, 'KeyZ': 0x1D,
         'Digit1': 0x1e, 'Digit2': 0x1f, 'Digit3': 0x20, 'Digit4': 0x21, 'Digit5': 0x22,
         'Digit6': 0x23, 'Digit7': 0x24, 'Digit8': 0x25, 'Digit9': 0x26, 'Digit0': 0x27,
         'Enter': 0x28, 'Escape': 0x29, 'Backspace': 0x2a, 'Tab': 0x2b, 'Space': 0x2c,
@@ -538,7 +538,6 @@ const App = (() => {
 
     function setError(msg) {
         connectError.textContent = msg;
-        btnConnect.disabled = false;
     }
 
     function showConsole(roomId) {
@@ -604,6 +603,31 @@ const App = (() => {
         setTimeout(() => sendHid(new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0])), 30);
     }
 
-    return { connect, disconnect, toggleFullscreen, toggleAudio, sendCtrlAltDel, fetchAgents };
+    // ─── 分辨率/帧率控制（通过 DataChannel 发送控制消息）─────────────────────
+    // 控制消息格式: type=0x10, subtype=0x01(分辨率) / 0x02(帧率)
+    //   分辨率: [0x10, 0x01, w_hi, w_lo, h_hi, h_lo, 0, 0]
+    //   帧率:   [0x10, 0x02, fps, 0, 0, 0, 0, 0]
+
+    function changeResolution(val) {
+        if (!val || !dc || dc.readyState !== 'open') return;
+        const [w, h] = val.split('x').map(Number);
+        if (!w || !h) return;
+        sendHid(new Uint8Array([0x10, 0x01,
+            (w >> 8) & 0xff, w & 0xff,
+            (h >> 8) & 0xff, h & 0xff,
+            0, 0]));
+        console.log(`Control: resolution change requested → ${w}×${h}`);
+    }
+
+    function changeFps(val) {
+        if (!val || !dc || dc.readyState !== 'open') return;
+        const fps = parseInt(val, 10);
+        if (!fps) return;
+        sendHid(new Uint8Array([0x10, 0x02, fps, 0, 0, 0, 0, 0]));
+        console.log(`Control: fps change requested → ${fps}`);
+    }
+
+    return { connect, disconnect, toggleFullscreen, toggleAudio, sendCtrlAltDel,
+             fetchAgents, changeResolution, changeFps };
 
 })();

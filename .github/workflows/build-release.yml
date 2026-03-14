@@ -25,12 +25,19 @@ jobs:
         include:
           - target: aarch64-unknown-linux-gnu
             artifact: any-kvm-agent-aarch64-linux
+            arch_label: aarch64
             pkg_config_allow_cross: "1"
             pkg_config_libdir: "/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
           - target: x86_64-unknown-linux-gnu
             artifact: any-kvm-agent-x86_64-linux
+            arch_label: x86_64
             pkg_config_allow_cross: "1"
             pkg_config_libdir: "/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+          - target: armv7-unknown-linux-gnueabihf
+            artifact: any-kvm-agent-armv7-linux
+            arch_label: armv7
+            pkg_config_allow_cross: "1"
+            pkg_config_libdir: "/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig"
 
     steps:
       - name: Checkout 代码
@@ -62,33 +69,151 @@ jobs:
       - name: 准备产物
         run: |
           mkdir -p pkg/any-kvm-agent/bin pkg/any-kvm-agent/etc pkg/any-kvm-agent/systemd
+
           cp agent/target/${{ matrix.target }}/release/any-kvm-agent pkg/any-kvm-agent/bin/
           cp agent/config.toml.example pkg/any-kvm-agent/etc/config.toml.example
           cp agent/config.toml.example pkg/any-kvm-agent/etc/config.toml
-          cp scripts/any-kvm-agent.service pkg/any-kvm-agent/systemd/ 2>/dev/null || true
 
-          # 生成 install.sh
+          # 复制 systemd service
+          if [ -f scripts/any-kvm-agent.service ]; then
+            cp scripts/any-kvm-agent.service pkg/any-kvm-agent/systemd/
+          fi
+
+          # 复制 HID Gadget 配置脚本（如果存在）
+          if [ -f scripts/setup-hid-gadget.sh ]; then
+            cp scripts/setup-hid-gadget.sh pkg/any-kvm-agent/
+          fi
+
+          # 生成 install.sh（支持 --server 零配置安装）
           cat > pkg/any-kvm-agent/install.sh << 'INSTALL_EOF'
           #!/bin/bash
           set -e
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          echo "[INFO] 安装 any-kvm-agent…"
+          SIGNAL_SERVER=""
+          ROOM_ID=""
+          TURN_URL=""
+          TURN_USER=""
+          TURN_PASS=""
+
+          # 解析命令行参数
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --server)   SIGNAL_SERVER="$2"; shift 2 ;;
+              --room)     ROOM_ID="$2"; shift 2 ;;
+              --turn-url) TURN_URL="$2"; shift 2 ;;
+              --turn-user) TURN_USER="$2"; shift 2 ;;
+              --turn-pass) TURN_PASS="$2"; shift 2 ;;
+              -h|--help)
+                echo "用法: install.sh [选项]"
+                echo ""
+                echo "选项:"
+                echo "  --server <IP:PORT>   信令服务器地址（如 192.168.1.100:8080）"
+                echo "  --room <ID>          房间ID / 设备名称（默认: hostname）"
+                echo "  --turn-url <URL>     TURN 服务器地址（如 turn:ip:3478）"
+                echo "  --turn-user <USER>   TURN 用户名"
+                echo "  --turn-pass <PASS>   TURN 密码"
+                echo "  -h, --help           显示帮助信息"
+                exit 0 ;;
+              *) echo "未知参数: $1"; exit 1 ;;
+            esac
+          done
+
+          echo "╔══════════════════════════════════════╗"
+          echo "║   Any-KVM Agent 安装程序             ║"
+          echo "╚══════════════════════════════════════╝"
+          echo ""
+
+          # 安装二进制文件
+          echo "[1/4] 安装二进制文件..."
           sudo install -m 755 "$SCRIPT_DIR/bin/any-kvm-agent" /usr/local/bin/any-kvm-agent
+          echo "  ✓ /usr/local/bin/any-kvm-agent"
+
+          # 安装配置文件
+          echo "[2/4] 安装配置文件..."
           sudo mkdir -p /etc/any-kvm-agent
           if [ ! -f /etc/any-kvm-agent/config.toml ]; then
-              sudo cp "$SCRIPT_DIR/etc/config.toml" /etc/any-kvm-agent/config.toml
-              echo "[OK] 配置文件已写入 /etc/any-kvm-agent/config.toml"
+            sudo cp "$SCRIPT_DIR/etc/config.toml" /etc/any-kvm-agent/config.toml
+
+            # 如果指定了 --server，自动写入配置
+            if [ -n "$SIGNAL_SERVER" ]; then
+              echo "  → 配置信令服务器: $SIGNAL_SERVER"
+              sudo sed -i "s|url *= *\".*\"|url = \"ws://${SIGNAL_SERVER}\"|" /etc/any-kvm-agent/config.toml
+            fi
+            if [ -n "$ROOM_ID" ]; then
+              echo "  → 配置房间ID: $ROOM_ID"
+              sudo sed -i "s|room_id *= *\".*\"|room_id = \"${ROOM_ID}\"|" /etc/any-kvm-agent/config.toml
+            else
+              # 默认使用 hostname 作为 room_id
+              ROOM_ID="$(hostname)"
+              sudo sed -i "s|room_id *= *\".*\"|room_id = \"${ROOM_ID}\"|" /etc/any-kvm-agent/config.toml
+            fi
+            if [ -n "$TURN_URL" ]; then
+              sudo sed -i "s|turn_url *= *\".*\"|turn_url = \"${TURN_URL}\"|" /etc/any-kvm-agent/config.toml
+            fi
+            if [ -n "$TURN_USER" ]; then
+              sudo sed -i "s|turn_username *= *\".*\"|turn_username = \"${TURN_USER}\"|" /etc/any-kvm-agent/config.toml
+            fi
+            if [ -n "$TURN_PASS" ]; then
+              sudo sed -i "s|turn_password *= *\".*\"|turn_password = \"${TURN_PASS}\"|" /etc/any-kvm-agent/config.toml
+            fi
+            echo "  ✓ /etc/any-kvm-agent/config.toml"
           else
-              echo "[INFO] 配置文件已存在，保留不覆盖"
-              sudo cp "$SCRIPT_DIR/etc/config.toml" /etc/any-kvm-agent/config.toml.new
+            echo "  ⓘ 配置文件已存在，保留不覆盖"
+            sudo cp "$SCRIPT_DIR/etc/config.toml" /etc/any-kvm-agent/config.toml.new
           fi
           sudo cp "$SCRIPT_DIR/etc/config.toml.example" /etc/any-kvm-agent/config.toml.example
+
+          # 安装 systemd 服务
+          echo "[3/4] 安装 systemd 服务..."
           if command -v systemctl &>/dev/null; then
+            if [ -f "$SCRIPT_DIR/systemd/any-kvm-agent.service" ]; then
               sudo cp "$SCRIPT_DIR/systemd/any-kvm-agent.service" /etc/systemd/system/
-              sudo systemctl daemon-reload
-              sudo systemctl enable any-kvm-agent
-              echo "[OK] 服务已安装，请先编辑 /etc/any-kvm-agent/config.toml 后执行：sudo systemctl start any-kvm-agent"
+            else
+              # 生成默认 service 文件
+              sudo tee /etc/systemd/system/any-kvm-agent.service > /dev/null << 'SVC'
+          [Unit]
+          Description=Any-KVM Device Agent
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/usr/local/bin/any-kvm-agent /etc/any-kvm-agent/config.toml
+          Restart=on-failure
+          RestartSec=5s
+          SupplementaryGroups=video audio input
+
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+            fi
+            sudo systemctl daemon-reload
+            sudo systemctl enable any-kvm-agent
+            echo "  ✓ 服务已注册并设为开机自启"
+          else
+            echo "  ⚠ 未检测到 systemd，跳过服务注册"
           fi
+
+          # 完成
+          echo "[4/4] 安装完成!"
+          echo ""
+          echo "══════════════════════════════════════"
+          if [ -n "$SIGNAL_SERVER" ]; then
+            echo "✓ 零配置安装完成！信令服务器: $SIGNAL_SERVER"
+            echo ""
+            echo "启动服务:"
+            echo "  sudo systemctl start any-kvm-agent"
+          else
+            echo "ⓘ 请编辑配置文件后启动服务:"
+            echo "  sudo nano /etc/any-kvm-agent/config.toml"
+            echo "  sudo systemctl start any-kvm-agent"
+          fi
+          echo ""
+          echo "常用命令:"
+          echo "  sudo systemctl status any-kvm-agent   # 查看状态"
+          echo "  sudo journalctl -u any-kvm-agent -f   # 查看日志"
+          echo "══════════════════════════════════════"
           INSTALL_EOF
           chmod +x pkg/any-kvm-agent/install.sh
 
@@ -112,8 +237,7 @@ jobs:
           fi
 
           # 打包 tar.gz
-          ARCH_LABEL=$(echo "${{ matrix.target }}" | cut -d- -f1)
-          tar -czf any-kvm-agent-${ARCH_LABEL}-linux.tar.gz -C pkg any-kvm-agent
+          tar -czf any-kvm-agent-${{ matrix.arch_label }}-linux.tar.gz -C pkg any-kvm-agent
           # 同时保留单独的二进制文件
           cp agent/target/${{ matrix.target }}/release/any-kvm-agent ${{ matrix.artifact }}
 
@@ -195,38 +319,100 @@ jobs:
           body: |
             ## Any-KVM ${{ steps.tag.outputs.tag }}
 
-            ### 📦 Release 包说明
+            浏览器直访物理设备的轻量级 KVM 控制平台。WebRTC P2P 直连，零延迟，无需客户端安装。
+
+            ---
+
+            ### 📦 下载说明
 
             | 文件 | 说明 | 适用设备 |
             |------|------|----------|
-            | `any-kvm-agent-aarch64-linux.tar.gz` | Agent 安装包（ARM64） | 玩客云、树莓派 5 等 |
-            | `any-kvm-agent-x86_64-linux.tar.gz` | Agent 安装包（x86_64） | Ubuntu x86_64 PC/服务器 |
-            | `any-kvm-agent-aarch64-linux` | Agent 单独二进制（ARM64） | 手动部署 |
-            | `any-kvm-agent-x86_64-linux` | Agent 单独二进制（x86_64） | 手动部署 |
-            | `signal-server-x86_64-linux` | 信令服务器（x86_64） | Linux 服务器 |
+            | `any-kvm-agent-aarch64-linux.tar.gz` | Agent 安装包（ARM64） | 树莓派 4/5、RK3399 等 |
+            | `any-kvm-agent-x86_64-linux.tar.gz` | Agent 安装包（x86_64） | PC/服务器 |
+            | `any-kvm-agent-armv7-linux.tar.gz` | Agent 安装包（ARMv7） | 玩客云、树莓派 2/3、STM32MP1 等 |
+            | `signal-server-x86_64-linux` | 信令服务器（x86_64） | Linux 云服务器 |
 
-            ### 🚀 快速部署信令服务器
+            ---
+
+            ### 🚀 快速开始
+
+            #### 1. 部署信令服务器（公网机器）
 
             ```bash
-            # 参考 deploy/ 目录使用 Docker Compose 一键部署
-            cd deploy && docker-compose up -d
+            chmod +x signal-server-x86_64-linux
+            ./signal-server-x86_64-linux -addr :8080 -web ./web
+            # 健康检查: curl http://YOUR_SERVER:8080/health
             ```
 
-            ### 📱 设备端安装（推荐）
+            #### 2. 安装设备端 Agent
+
+            **零配置安装（推荐）：**
+            ```bash
+            tar xzf any-kvm-agent-<ARCH>-linux.tar.gz
+            sudo ./any-kvm-agent/install.sh --server YOUR_SERVER:8080 --room my-device
+            sudo systemctl start any-kvm-agent
+            ```
+
+            **手动安装：**
+            ```bash
+            tar xzf any-kvm-agent-<ARCH>-linux.tar.gz
+            sudo ./any-kvm-agent/install.sh
+            # 编辑配置
+            sudo nano /etc/any-kvm-agent/config.toml
+            sudo systemctl start any-kvm-agent
+            ```
+
+            #### 3. 浏览器访问
+
+            打开 `http://YOUR_SERVER:8080`，点击在线设备即可开始控制。
+
+            支持功能：
+            - ✅ 实时视频（H.264 WebRTC）
+            - ✅ 键盘输入（HID USB Gadget / CH9329）
+            - ✅ 鼠标控制（绝对坐标）
+            - ✅ 实时音频（Opus WebRTC）
+            - ✅ 运行时分辨率/帧率切换
+            - ✅ Ctrl+Alt+Del 等组合键
+            - ✅ 全屏模式
+
+            ---
+
+            ### ⚙️ 配置文件说明
+
+            配置文件位于 `/etc/any-kvm-agent/config.toml`，最少需修改：
+
+            ```toml
+            [signal]
+            url = "ws://YOUR_SERVER:8080"     # 信令服务器地址
+            room_id = "my-device"             # 设备名称（唯一）
+
+            [turn]
+            url = "turn:YOUR_SERVER:3478"     # TURN 中继（可选，NAT 穿透用）
+            username = "kvmuser"
+            password = "your-password"
+            ```
+
+            ### 🔧 USB HID 配置（可选）
+
+            如果通过 USB OTG 控制目标设备，需配置 USB HID Gadget：
+            ```bash
+            # 运行 HID Gadget 配置脚本（如果包含在安装包中）
+            sudo bash setup-hid-gadget.sh
+            ```
+
+            ### 📋 常用命令
 
             ```bash
-            # 下载并解压安装包（以 ARM64 为例）
-            tar xzf any-kvm-agent-aarch64-linux.tar.gz
-            # 编辑配置文件（至少修改信令服务器地址和房间 ID）
-            nano any-kvm-agent/etc/config.toml
-            # 一键安装（含 systemd 服务注册）
-            sudo ./any-kvm-agent/install.sh
-            # 启动服务
-            sudo systemctl start any-kvm-agent
+            sudo systemctl status any-kvm-agent    # 查看服务状态
+            sudo systemctl restart any-kvm-agent   # 重启服务
+            sudo journalctl -u any-kvm-agent -f    # 查看实时日志
+            RUST_LOG=debug any-kvm-agent /etc/any-kvm-agent/config.toml  # 调试运行
             ```
           files: |
             artifacts/any-kvm-agent-aarch64-linux/any-kvm-agent-aarch64-linux
             artifacts/any-kvm-agent-x86_64-linux/any-kvm-agent-x86_64-linux
+            artifacts/any-kvm-agent-armv7-linux/any-kvm-agent-armv7-linux
             artifacts/any-kvm-agent-aarch64-linux-tar/*.tar.gz
             artifacts/any-kvm-agent-x86_64-linux-tar/*.tar.gz
+            artifacts/any-kvm-agent-armv7-linux-tar/*.tar.gz
             artifacts/signal-server-x86_64-linux/signal-server
