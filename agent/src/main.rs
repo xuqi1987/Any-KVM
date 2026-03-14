@@ -7,6 +7,7 @@ mod signal_client;
 
 use anyhow::Result;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tracing::{info, warn, error};
 
@@ -33,9 +34,11 @@ async fn main() -> Result<()> {
     // video 模块输出 H.264 Annex-B NAL 帧
     // 如果配置的源（默认 v4l2）失败，自动回退到屏幕截图
     let (video_tx, video_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(32);
+    let keyframe_flag = Arc::new(AtomicBool::new(false));
     let video_cfg = cfg.video.clone();
+    let kf_flag = keyframe_flag.clone();
     tokio::task::spawn_blocking(move || {
-        match video::run(video_cfg.clone(), video_tx.clone()) {
+        match video::run(video_cfg.clone(), video_tx.clone(), kf_flag.clone()) {
             Ok(()) => {}
             Err(e) => {
                 error!("video module error: {:#}", e);
@@ -44,7 +47,7 @@ async fn main() -> Result<()> {
                     warn!("video: falling back to screen capture");
                     let mut screen_cfg = video_cfg;
                     screen_cfg.source = "screen".to_string();
-                    if let Err(e2) = video::run(screen_cfg, video_tx) {
+                    if let Err(e2) = video::run(screen_cfg, video_tx, kf_flag) {
                         error!("screen capture fallback also failed: {:#}", e2);
                     }
                 }
@@ -118,6 +121,7 @@ async fn main() -> Result<()> {
         let hid_tx_this = hid_tx.clone();
 
         let ice_cfg = cfg.ice.clone();
+        let kf = keyframe_flag.clone();
         let webrtc_handle = tokio::spawn(async move {
             if let Err(e) = webrtc::run(
                 ice_cfg,
@@ -128,10 +132,12 @@ async fn main() -> Result<()> {
                 answer_rx,
                 remote_cand_rx,
                 local_cand_tx,
+                kf,
             ).await {
                 error!("webrtc module error: {:#}", e);
             }
         });
+        let webrtc_abort = webrtc_handle.abort_handle();
 
         let sig_cfg = cfg.signal.clone();
         let signal_handle = tokio::spawn(async move {
@@ -145,11 +151,22 @@ async fn main() -> Result<()> {
                 error!("signal_client module error: {:#}", e);
             }
         });
+        let signal_abort = signal_handle.abort_handle();
+
+        info!("reconnect: starting new session");
 
         tokio::select! {
-            _ = webrtc_handle  => { warn!("webrtc session ended, reconnecting in {:?}…", reconnect_delay); }
-            _ = signal_handle  => { warn!("signal session ended, reconnecting in {:?}…", reconnect_delay); }
+            _ = webrtc_handle  => {
+                signal_abort.abort();
+                warn!("webrtc session ended, reconnecting in {:?}…", reconnect_delay);
+            }
+            _ = signal_handle  => {
+                webrtc_abort.abort();
+                warn!("signal session ended, reconnecting in {:?}…", reconnect_delay);
+            }
             _ = tokio::signal::ctrl_c() => {
+                webrtc_abort.abort();
+                signal_abort.abort();
                 info!("Ctrl-C received, shutting down");
                 return Ok(());
             }
@@ -158,6 +175,5 @@ async fn main() -> Result<()> {
         tokio::time::sleep(reconnect_delay).await;
         // 退避：首次 3s，逐步增加到最多 30s
         reconnect_delay = (reconnect_delay + Duration::from_secs(2)).min(Duration::from_secs(30));
-        info!("reconnect: starting new session");
     }
 }

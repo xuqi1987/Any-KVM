@@ -33,7 +33,7 @@ bash .github/skills/deploy-test/scripts/build-agent.sh
 
 ### Step 2 — 部署信令服务器（远端）
 
-参照 `.github/workflows/auto-deploy.yml` 流程：远端 git clone/pull → 配置 coturn → docker-compose up。
+通过 scp 上传本地文件到远端服务器，然后 docker-compose 构建启动。无需远端访问 GitHub。
 
 ```bash
 bash .github/skills/deploy-test/scripts/deploy-signal.sh
@@ -78,9 +78,9 @@ bash .github/skills/deploy-test/scripts/verify.sh
 
 ## Web 服务器部署说明
 
-远端部署流程参照 `.github/workflows/auto-deploy.yml`：
+远端部署流程（通过 scp 上传，不依赖 GitHub）：
 1. SSH 到远端 → 检查/安装 docker + docker-compose
-2. `git clone --depth 1 https://github.com/xuqi1987/Any-KVM.git`（或 `git pull` 更新）
+2. `scp` 上传本地 signal/、deploy/、web/ 目录到远端 `/root/Any-KVM/`
 3. 配置 `coturn.conf`（替换公网 IP 和 TURN 密码）
 4. `docker-compose up -d --build`（构建 signal-server + 启动 coturn）
 5. 健康检查 `/health` 确认就绪

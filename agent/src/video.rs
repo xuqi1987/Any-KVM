@@ -12,8 +12,10 @@
 use crate::config::VideoConfig;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // V4L2 相关 import（仅 v4l2-capture 路径使用）
 #[cfg(feature = "v4l2-capture")]
@@ -25,13 +27,13 @@ use v4l::video::Capture;
 #[cfg(feature = "v4l2-capture")]
 use v4l::{Device, FourCC};
 
-pub fn run(cfg: VideoConfig, tx: Sender<Bytes>) -> Result<()> {
+pub fn run(cfg: VideoConfig, tx: Sender<Bytes>, keyframe_flag: Arc<AtomicBool>) -> Result<()> {
     match cfg.source.as_str() {
         "screen" => {
             #[cfg(feature = "screen-capture")]
             {
                 info!("video: source=screen (desktop capture)");
-                return run_screen_capture(&cfg, &tx);
+                return run_screen_capture(&cfg, &tx, &keyframe_flag);
             }
             #[cfg(not(feature = "screen-capture"))]
             bail!(
@@ -52,7 +54,7 @@ pub fn run(cfg: VideoConfig, tx: Sender<Bytes>) -> Result<()> {
                 let hw_ok = cfg.hw_encode && try_hw_h264(&dev, &cfg, &tx).is_ok();
                 if !hw_ok {
                     warn!("video: hardware H.264 not available, falling back to openh264");
-                    run_sw_h264(&dev, &cfg, &tx)?;
+                    run_sw_h264(&dev, &cfg, &tx, &keyframe_flag)?;
                 }
             }
             #[cfg(not(feature = "v4l2-capture"))]
@@ -101,7 +103,7 @@ fn try_hw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
 // ─── 软件 H.264（YUYV → openh264）──────────────────────────────────────────
 
 #[cfg(feature = "v4l2-capture")]
-fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()> {
+fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {
     let mut fmt = dev.format()?;
     fmt.width  = cfg.width;
     fmt.height = cfg.height;
@@ -131,6 +133,10 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
 
     loop {
         let (buf, _meta) = stream.next()?;
+        if keyframe_flag.swap(false, Ordering::Relaxed) {
+            encoder.force_intra_frame();
+            debug!("video: forcing IDR frame (keyframe requested)");
+        }
         let yuv = yuyv_to_yuv420(buf, w, h);
         let src = openh264::formats::YUVBuffer::from_vec(yuv, w, h);
         let bitstream = encoder.encode(&src).context("openh264 encode error")?;
@@ -144,7 +150,7 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
 // ─── 屏幕截图源（feature: screen-capture）────────────────────────────────────
 
 #[cfg(feature = "screen-capture")]
-fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()> {
+fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc<AtomicBool>) -> Result<()> {
     use scrap::{Capturer, Display};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -181,6 +187,10 @@ fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()> {
             Ok(raw) => {
                 // raw: BGRA，stride = raw.len() / disp_h
                 let stride = raw.len() / disp_h;
+                if keyframe_flag.swap(false, Ordering::Relaxed) {
+                    encoder.force_intra_frame();
+                    debug!("video: forcing IDR frame (keyframe requested)");
+                }
                 let yuv = bgra_to_yuv420(&raw, stride, disp_w, disp_h, enc_w, enc_h);
                 let src = openh264::formats::YUVBuffer::from_vec(yuv, enc_w, enc_h);
                 let bitstream = encoder.encode(&src).context("openh264 encode error")?;

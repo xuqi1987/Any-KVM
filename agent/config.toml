@@ -1,0 +1,36 @@
+[signal]
+url     = "ws://47.86.7.158:8080/ws"
+room_id = "test-room"
+
+[video]
+source       = "screen"
+device       = "/dev/video0"
+width        = 1280
+height       = 720
+fps          = 15
+bitrate_kbps = 500
+hw_encode    = false
+
+[audio]
+device       = "default"
+sample_rate  = 48000
+channels     = 1
+bitrate_kbps = 16
+enabled      = false
+
+[hid]
+mode            = "gadget"
+keyboard_device = "/dev/hidg0"
+mouse_device    = "/dev/hidg1"
+serial_port     = "/dev/ttyUSB0"
+serial_baud     = 9600
+
+[ice]
+stun_servers = [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+    "stun:stun.cloudflare.com:3478",
+]
+# turn_url      = "turn:47.86.7.158:3478"
+# turn_username = "kvmuser"
+# turn_password = "change_me_in_production"

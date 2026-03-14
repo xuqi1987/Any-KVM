@@ -67,7 +67,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/any-kvm-agent /etc/any-kvm-agent/config.toml
+Environment=DISPLAY=:99
+ExecStartPre=-/usr/bin/pkill -f "Xvfb :99"
+ExecStart=/usr/bin/any-kvm-agent-wrapper
+ExecStopPost=-/usr/bin/pkill -f "Xvfb :99"
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -131,6 +134,11 @@ echo ""
 # 将会嵌入安装包，安装时直接写入 /etc/any-kvm-agent/config.toml
 _generate_config() {
     local dest="$1"
+    # 自动检测视频源：有 V4L2 设备用 v4l2，否则用屏幕截图
+    local video_source="screen"
+    if [ -e /dev/video0 ]; then
+        video_source="v4l2"
+    fi
     cat > "$dest" << EOF
 # Any-KVM Agent 配置文件
 # 由 build-and-package.sh 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
@@ -140,6 +148,7 @@ url     = "${SIGNAL_URL}"
 room_id = "${OPT_ROOM}"
 
 [video]
+source       = "${video_source}"
 device       = "/dev/video0"
 width        = 1280
 height       = 720
@@ -168,6 +177,9 @@ stun_servers = [
     "stun:stun.cloudflare.com:3478",
     "stun:stun.miwifi.com:3478",
 ]
+turn_url      = "turn:${OPT_SERVER}:3478"
+turn_username = "kvmuser"
+turn_password = "anykvm2026"
 EOF
 }
 
@@ -245,6 +257,8 @@ TAR_ROOT="$TMP_TAR/any-kvm-agent"
 mkdir -p "$TAR_ROOT/bin" "$TAR_ROOT/etc" "$TAR_ROOT/systemd"
 
 cp "$BINARY"               "$TAR_ROOT/bin/any-kvm-agent"
+cp "$SCRIPT_DIR/any-kvm-agent-wrapper.sh" "$TAR_ROOT/bin/any-kvm-agent-wrapper"
+chmod 755 "$TAR_ROOT/bin/any-kvm-agent-wrapper"
 cp "$GENERATED_CONFIG"     "$TAR_ROOT/etc/config.toml"
 cp "$AGENT_DIR/config.toml.example" "$TAR_ROOT/etc/config.toml.example"
 if [ -f "$SCRIPT_DIR/any-kvm-agent.service" ]; then
@@ -263,7 +277,8 @@ info() { echo -e "\033[0;34m[INFO]\033[0m $*"; }
 ok()   { echo -e "${GREEN}[OK]\033[0m   $*"; }
 
 info "安装 any-kvm-agent…"
-sudo install -m 755 "$SCRIPT_DIR/bin/any-kvm-agent" /usr/local/bin/any-kvm-agent
+sudo install -m 755 "$SCRIPT_DIR/bin/any-kvm-agent" /usr/bin/any-kvm-agent
+sudo install -m 755 "$SCRIPT_DIR/bin/any-kvm-agent-wrapper" /usr/bin/any-kvm-agent-wrapper
 
 sudo mkdir -p /etc/any-kvm-agent
 if [ ! -f /etc/any-kvm-agent/config.toml ]; then
@@ -309,6 +324,8 @@ if [ "$OPT_NO_DEB" = false ] && command -v dpkg-deb &>/dev/null; then
     install -d "$TMP_DEB/usr/share/doc/any-kvm-agent"
 
     install -m 755 "$BINARY"           "$TMP_DEB/usr/bin/any-kvm-agent"
+    install -m 755 "$SCRIPT_DIR/any-kvm-agent-wrapper.sh" \
+                                       "$TMP_DEB/usr/bin/any-kvm-agent-wrapper"
     install -m 644 "$GENERATED_CONFIG" "$TMP_DEB/etc/any-kvm-agent/config.toml"
     install -m 644 "$AGENT_DIR/config.toml.example" \
                                        "$TMP_DEB/etc/any-kvm-agent/config.toml.example"

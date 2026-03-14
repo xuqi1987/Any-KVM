@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use str0m::change::SdpAnswer;
 use str0m::media::{Direction, Frequency, MediaTime, Mid};
@@ -31,6 +33,7 @@ pub async fn run(
     mut answer_rx:        Receiver<String>,
     mut remote_cand_rx:   Receiver<String>,
     _local_cand_tx:       Sender<String>,
+    keyframe_flag:        Arc<AtomicBool>,
 ) -> Result<()> {
     info!("webrtc: starting");
 
@@ -116,7 +119,8 @@ pub async fn run(
     let answer_sdp = answer_rx.recv()
         .await
         .context("answer channel closed")?;
-    info!("webrtc: received SDP answer");
+    info!("webrtc: received SDP answer ({} bytes)", answer_sdp.len());
+    debug!("webrtc: SDP answer:\n{}", answer_sdp);
 
     let answer = SdpAnswer::from_sdp_string(&answer_sdp)?;
     rtc.sdp_api().accept_answer(pending, answer)?;
@@ -130,6 +134,10 @@ pub async fn run(
     let frame_dur_90k = 90000 / 15u32;
     let audio_dur_90k = 960u32; // Opus: 20ms @ 48kHz = 960 samples
     let mut buf = vec![0u8; 65536];
+    let mut video_frame_count: u64 = 0;
+    let mut video_write_count: u64 = 0;
+    let mut video_drop_count: u64 = 0;
+    let mut transmit_count: u64 = 0;
 
     loop {
         // str0m 会在内部超时后将 alive 设为 false
@@ -167,45 +175,79 @@ pub async fn run(
             turn_refresh_at = Instant::now() + Duration::from_secs(240);
         }
 
-        // 发送视频帧
-        if let Ok(frame) = video_rx.try_recv() {
-            send_video(&mut rtc, video_mid, &frame, video_ts);
-            video_ts = video_ts.wrapping_add(frame_dur_90k);
+        // 仅在 ICE 连接后发送媒体（str0m 在 ICE 未连接时会静默丢弃写入的帧）
+        if ice_connected {
+            // 发送视频帧
+            match video_rx.try_recv() {
+                Ok(frame) => {
+                    video_frame_count += 1;
+                    if video_frame_count == 1 {
+                        info!("webrtc: first video frame received ({} bytes), NAL types: {}",
+                            frame.len(), describe_h264_nals(&frame));
+                    }
+                    send_video(&mut rtc, video_mid, &frame, video_ts, &mut video_write_count, &mut video_drop_count);
+                    video_ts = video_ts.wrapping_add(frame_dur_90k);
+                    if video_frame_count % 150 == 0 {
+                        info!("webrtc: video stats — received={}, written={}, dropped={}, udp_tx={}",
+                            video_frame_count, video_write_count, video_drop_count, transmit_count);
+                    }
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    warn!("webrtc: video broadcast lagged, skipped {} frames", n);
+                }
+                _ => {}
+            }
+
+            // 发送音频帧
+            match audio_rx.try_recv() {
+                Ok(frame) => {
+                    send_audio(&mut rtc, audio_mid, &frame, audio_ts);
+                    audio_ts = audio_ts.wrapping_add(audio_dur_90k);
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    warn!("webrtc: audio broadcast lagged, skipped {} frames", n);
+                }
+                _ => {}
+            }
+        } else {
+            // ICE 未连接时丢弃积压的帧，避免 broadcast lag
+            while video_rx.try_recv().is_ok() {}
+            while audio_rx.try_recv().is_ok() {}
         }
 
-        // 发送音频帧
-        if let Ok(frame) = audio_rx.try_recv() {
-            send_audio(&mut rtc, audio_mid, &frame, audio_ts);
-            audio_ts = audio_ts.wrapping_add(audio_dur_90k);
-        }
-
-        // 轮询 str0m 输出（本地 ICE candidate、网络数据包等）
-        let timeout = match rtc.poll_output()? {
-            Output::Timeout(t) => t,
-            Output::Transmit(send) => {
-                // 如果源地址是 relay 地址，通过 TURN Send indication 发送
-                if let (Some(raddr), Some(ref ts)) = (relay_addr, &turn_state) {
-                    if send.source == raddr {
-                        let wrapped = build_turn_send_indication(send.destination, &send.contents);
-                        socket.send_to(&wrapped, ts.turn_addr).await.ok();
-                        Instant::now()
+        // 轮询 str0m 输出 — 循环 poll 直到 Timeout，一次性发完所有排队的包
+        let mut timeout = Instant::now();
+        loop {
+            match rtc.poll_output()? {
+                Output::Timeout(t) => {
+                    timeout = t;
+                    break;
+                }
+                Output::Transmit(send) => {
+                    transmit_count += 1;
+                    if transmit_count == 1 {
+                        info!("webrtc: first Transmit output ({} bytes to {})", send.contents.len(), send.destination);
+                    }
+                    // 如果源地址是 relay 地址，通过 TURN Send indication 发送
+                    if let (Some(raddr), Some(ref ts)) = (relay_addr, &turn_state) {
+                        if send.source == raddr {
+                            let wrapped = build_turn_send_indication(send.destination, &send.contents);
+                            socket.send_to(&wrapped, ts.turn_addr).await.ok();
+                        } else {
+                            socket.send_to(&send.contents, send.destination).await.ok();
+                        }
                     } else {
                         socket.send_to(&send.contents, send.destination).await.ok();
-                        Instant::now()
                     }
-                } else {
-                    socket.send_to(&send.contents, send.destination).await.ok();
-                    Instant::now()
+                }
+                Output::Event(event) => {
+                    if handle_event(event, &hid_tx, &mut ice_connected, &keyframe_flag).await {
+                        info!("webrtc: session ended, returning for reconnection");
+                        return Ok(());
+                    }
                 }
             }
-            Output::Event(event) => {
-                if handle_event(event, &hid_tx, &mut ice_connected).await {
-                    info!("webrtc: session ended, returning for reconnection");
-                    return Ok(());
-                }
-                Instant::now()
-            }
-        };
+        }
 
         // 从 UDP socket 读取网络数据，超时后继续
         // 使用 primary local IP 作为 dst，使 str0m 能匹配到已注册的候选地址
@@ -260,11 +302,33 @@ fn build_full_offer(rtc: &mut Rtc) -> Result<(String, SdpPendingOffer, Mid, Mid)
     Ok((offer.to_sdp_string(), pending, video_mid, audio_mid))
 }
 
-fn send_video(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32) {
-    let Some(writer) = rtc.writer(mid) else { return };
-    let pt = writer.payload_params().next().map(|p| p.pt());
-    let Some(pt) = pt else { return };
-    let _ = writer.write(pt, Instant::now(), MediaTime::from_90khz(ts as i64), data.to_vec());
+fn send_video(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32, write_count: &mut u64, drop_count: &mut u64) {
+    let Some(writer) = rtc.writer(mid) else {
+        *drop_count += 1;
+        if *drop_count <= 3 || *drop_count % 100 == 0 {
+            warn!("webrtc: send_video — writer not ready for mid={} (dropped={})", mid, drop_count);
+        }
+        return;
+    };
+    // 必须选择 H.264 codec（packetization-mode=1）来匹配 openh264 输出
+    let pt = writer.payload_params()
+        .filter(|p| p.spec().codec == str0m::format::Codec::H264)
+        .find(|p| p.spec().format.packetization_mode == Some(1))
+        .or_else(|| writer.payload_params().find(|p| p.spec().codec == str0m::format::Codec::H264))
+        .map(|p| p.pt());
+    let Some(pt) = pt else {
+        warn!("webrtc: send_video — no H.264 payload params for mid={}", mid);
+        return;
+    };
+    *write_count += 1;
+    if *write_count == 1 {
+        info!("webrtc: send_video — writing first H.264 frame ({} bytes, mid={}, pt={})", data.len(), mid, pt);
+    }
+    if let Err(e) = writer.write(pt, Instant::now(), MediaTime::from_90khz(ts as i64), data.to_vec()) {
+        if *write_count <= 5 || *write_count % 100 == 0 {
+            warn!("webrtc: send_video — write error: {} (count={})", e, write_count);
+        }
+    }
 }
 
 fn send_audio(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32) {
@@ -275,7 +339,7 @@ fn send_audio(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32) {
 }
 
 /// 返回 true 表示应退出主循环（ICE 已失败/断开）
-async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut bool) -> bool {
+async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut bool, keyframe_flag: &Arc<AtomicBool>) -> bool {
     match event {
         Event::ChannelData(data) => {
             let _ = hid_tx.send(Bytes::copy_from_slice(&data.data)).await;
@@ -285,6 +349,10 @@ async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut 
             use str0m::IceConnectionState;
             match s {
                 IceConnectionState::Connected | IceConnectionState::Completed => {
+                    if !*ice_connected {
+                        info!("webrtc: ICE just connected, requesting IDR for first frame");
+                        keyframe_flag.store(true, Ordering::Relaxed);
+                    }
                     *ice_connected = true;
                 }
                 IceConnectionState::Disconnected => {
@@ -296,9 +364,55 @@ async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut 
                 _ => {}
             }
         }
-        _ => {}
+        Event::KeyframeRequest(_) => {
+            debug!("webrtc: KeyframeRequest received, signaling encoder");
+            keyframe_flag.store(true, Ordering::Relaxed);
+        }
+        other => {
+            info!("webrtc event: {:?}", other);
+        }
     }
     false
+}
+
+/// 解析 Annex B 字节流，返回 NAL 类型描述（用于调试日志）
+fn describe_h264_nals(data: &[u8]) -> String {
+    let mut types = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        // 查找 00 00 01 或 00 00 00 01 start code
+        if i + 3 < data.len() && data[i] == 0 && data[i+1] == 0 {
+            let (nal_start, _sc_len) = if data[i+2] == 1 {
+                (i + 3, 3)
+            } else if i + 4 <= data.len() && data[i+2] == 0 && data[i+3] == 1 {
+                (i + 4, 4)
+            } else {
+                i += 1;
+                continue;
+            };
+            if nal_start < data.len() {
+                let nal_type = data[nal_start] & 0x1F;
+                let name = match nal_type {
+                    1 => "P-slice",
+                    5 => "IDR",
+                    6 => "SEI",
+                    7 => "SPS",
+                    8 => "PPS",
+                    9 => "AUD",
+                    _ => "other",
+                };
+                types.push(format!("{}({})", name, nal_type));
+            }
+            i = nal_start + 1;
+        } else {
+            i += 1;
+        }
+    }
+    if types.is_empty() {
+        "none".to_string()
+    } else {
+        types.join(", ")
+    }
 }
 
 /// 枚举本机可用的非回环、非 link-local 的网络接口 IP 地址

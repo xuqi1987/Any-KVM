@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# deploy-signal.sh — 参照 auto-deploy.yml 流程，在远端部署 signal-server + coturn
-# 流程：git clone/pull → 配置 coturn → docker-compose up
+# deploy-signal.sh — 通过 scp 上传本地文件到远端，部署 signal-server + coturn
+# 流程：scp 上传必要文件 → 配置 coturn → docker build + docker-compose up
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
-echo "==> [1/4] 远端检查依赖（docker、docker-compose、git）"
+REMOTE_DIR="/root/Any-KVM"
+
+echo "==> [1/4] 远端检查依赖（docker、docker-compose）"
 ssh_remote 'bash -s' << 'CHECK_DEPS'
 set -e
 if ! command -v docker &> /dev/null; then
@@ -13,7 +15,7 @@ if ! command -v docker &> /dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-        docker.io curl git wget || {
+        docker.io curl wget || {
         curl -fsSL https://get.docker.com | sh
     }
     systemctl start docker || true
@@ -30,25 +32,26 @@ echo "✓ docker $(docker --version | grep -oP '\d+\.\d+\.\d+')"
 echo "✓ docker-compose $(docker-compose version --short 2>/dev/null || docker-compose --version)"
 CHECK_DEPS
 
-echo "==> [2/4] 远端 git clone/pull 代码"
-ssh_remote 'bash -s' << 'GIT_SYNC'
-set -e
-cd /root
-if [ -d "Any-KVM" ]; then
-    cd Any-KVM && git pull && cd /root
-    echo "✓ 代码已更新"
-else
-    for i in 1 2 3; do
-        if timeout 300 git clone --depth 1 https://github.com/xuqi1987/Any-KVM.git; then
-            echo "✓ 代码已克隆"
-            break
-        fi
-        echo "⚠ 克隆失败，重试 ($i/3)..."
-        sleep 5
-    done
-fi
-[ -d "Any-KVM" ] || { echo "❌ 代码获取失败"; exit 1; }
-GIT_SYNC
+echo "==> [2/4] 通过 scp 上传项目文件到远端"
+# 在远端创建目录结构
+ssh_remote "mkdir -p ${REMOTE_DIR}/{signal,deploy,web}"
+
+# 上传信令服务器源码
+scp_to_remote "${REPO_ROOT}/signal/go.mod" "${REMOTE_DIR}/signal/go.mod"
+scp_to_remote "${REPO_ROOT}/signal/go.sum" "${REMOTE_DIR}/signal/go.sum" 2>/dev/null || true
+scp_to_remote "${REPO_ROOT}/signal/main.go" "${REMOTE_DIR}/signal/main.go"
+
+# 上传部署配置
+scp_to_remote "${REPO_ROOT}/deploy/docker-compose.yml" "${REMOTE_DIR}/deploy/docker-compose.yml"
+scp_to_remote "${REPO_ROOT}/deploy/Dockerfile.signal" "${REMOTE_DIR}/deploy/Dockerfile.signal"
+scp_to_remote "${REPO_ROOT}/deploy/coturn.conf" "${REMOTE_DIR}/deploy/coturn.conf"
+
+# 上传 Web 前端静态文件
+scp_to_remote "${REPO_ROOT}/web/index.html" "${REMOTE_DIR}/web/index.html"
+scp_to_remote "${REPO_ROOT}/web/app.js" "${REMOTE_DIR}/web/app.js"
+scp_to_remote "${REPO_ROOT}/web/style.css" "${REMOTE_DIR}/web/style.css"
+
+echo "✓ 文件已上传到远端 ${REMOTE_DIR}"
 
 echo "==> [3/4] 远端配置 & docker-compose 启动"
 ssh_remote 'bash -s' << 'DEPLOY'
