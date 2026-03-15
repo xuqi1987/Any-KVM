@@ -429,8 +429,23 @@ const App = (() => {
         };
 
         pc.ondatachannel = ({ channel }) => {
-            channel.binaryType = 'arraybuffer';
-            channel.onmessage = ({ data }) => {
+            console.log('DataChannel received from agent:', channel.label);
+            dc = channel;
+            dc.binaryType = 'arraybuffer';
+            dc.onopen = () => {
+                console.log('DataChannel open');
+                updateHidStatusUI();
+                // DataChannel 打开后立即应用自适应质量
+                if (adaptiveEnabled && !manualOverride) {
+                    setTimeout(applyAutoQuality, 500);
+                }
+            };
+            dc.onclose = () => {
+                console.log('DataChannel closed');
+                updateHidStatusUI();
+            };
+            dc.onmessage = ({ data }) => {
+                // 处理来自 agent 的消息
                 if (data instanceof ArrayBuffer) {
                     const buf = new Uint8Array(data);
                     if (buf.length >= 2 && buf[0] === 0x11) {
@@ -629,35 +644,7 @@ const App = (() => {
                     await pc.setLocalDescription(answer);
                     wsSend({ type: 'answer', payload: answer });
                     overlayMsg.textContent = 'ICE 协商中…';
-
-                    dc = pc.createDataChannel('hid-control', { ordered: false, maxRetransmits: 0 });
-                    dc.binaryType = 'arraybuffer';
-                    dc.onopen = () => {
-                        console.log('DataChannel open');
-                        updateHidStatusUI();
-                        // DataChannel 打开后立即应用自适应质量
-                        if (adaptiveEnabled && !manualOverride) {
-                            setTimeout(applyAutoQuality, 500);
-                        }
-                    };
-                    dc.onclose = () => {
-                        console.log('DataChannel closed');
-                        updateHidStatusUI();
-                    };
-                    dc.onmessage = ({ data }) => {
-                        // 处理来自 agent 的消息
-                        if (data instanceof ArrayBuffer) {
-                            const buf = new Uint8Array(data);
-                            if (buf.length >= 2 && buf[0] === 0x11) {
-                                // HID 状态报文: [0x11, status, ...]
-                                hidStatusReceived = true;
-                                hidKeyboard = !!(buf[1] & 0x01);
-                                hidMouse = !!(buf[1] & 0x02);
-                                console.log(`HID status: keyboard=${hidKeyboard}, mouse=${hidMouse}`);
-                                updateHidStatusUI();
-                            }
-                        }
-                    };
+                    // DataChannel 由 agent 创建，浏览器通过 pc.ondatachannel 接收
                 } catch (e) {
                     console.error('offer handling error:', e);
                     overlayMsg.textContent = `WebRTC 错误: ${e.message}`;
