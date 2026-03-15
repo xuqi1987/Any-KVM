@@ -185,6 +185,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room")
 	role := r.URL.Query().Get("role") // "device" | "client"
 
+	log.Printf("ws: new connection attempt from %s (UA: %s, Origin: %s)",
+		r.RemoteAddr, r.UserAgent(), r.Header.Get("Origin"))
+
 	if roomID == "" {
 		http.Error(w, `{"error":"missing room"}`, http.StatusBadRequest)
 		return
@@ -193,6 +196,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"role must be device or client"}`, http.StatusBadRequest)
 		return
 	}
+
+	// 添加 CORS 头以支持 Safari
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

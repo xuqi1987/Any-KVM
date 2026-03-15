@@ -15,7 +15,7 @@
 
 const App = (() => {
 
-    const VERSION = '0.2.1';
+    const VERSION = '0.2.2';
 
     // ─── 内置 STUN 服务器列表（自动使用，无需用户填写）────────────────────────
     const _host = window.location.hostname;
@@ -220,8 +220,11 @@ const App = (() => {
     }
 
     function sendMouseMove(x, y) {
-        const ax = Math.min(32767, Math.max(0, Math.round((x / remoteVideo.clientWidth) * 32767)));
-        const ay = Math.min(32767, Math.max(0, Math.round((y / remoteVideo.clientHeight) * 32767)));
+        // 防止视频尺寸为 0 导致鼠标坐标异常
+        const vw = remoteVideo.clientWidth || 1;
+        const vh = remoteVideo.clientHeight || 1;
+        const ax = Math.min(32767, Math.max(0, Math.round((x / vw) * 32767)));
+        const ay = Math.min(32767, Math.max(0, Math.round((y / vh) * 32767)));
         sendHid(new Uint8Array([0x02, hid.buttons,
             (ax >> 8) & 0xff, ax & 0xff,
             (ay >> 8) & 0xff, ay & 0xff,
