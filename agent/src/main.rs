@@ -88,22 +88,53 @@ async fn main() -> Result<()> {
     let (video_bcast_tx, _) = broadcast::channel::<bytes::Bytes>(32);
     let (audio_bcast_tx, _) = broadcast::channel::<bytes::Bytes>(64);
 
-    // 将 mpsc receiver 桥接到 broadcast
+    // 将 mpsc receiver 桥接到 broadcast（peer 连接时才消费，否则背压到 video 模块）
+    let peer_connected = Arc::new(AtomicBool::new(false));
     {
         let mut vr = video_rx;
         let vbt = video_bcast_tx.clone();
+        let pc = peer_connected.clone();
         tokio::spawn(async move {
-            while let Some(frame) = vr.recv().await {
-                let _ = vbt.send(frame);
+            let mut was_idle = true;
+            loop {
+                if !pc.load(std::sync::atomic::Ordering::Relaxed) {
+                    // 无浏览器连接：不消费，让 mpsc channel 填满触发 video 模块背压
+                    was_idle = true;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+                // 刚从 idle 恢复：drain 旧帧避免发送过时数据
+                if was_idle {
+                    was_idle = false;
+                    while vr.try_recv().is_ok() {}
+                }
+                match vr.recv().await {
+                    Some(frame) => { let _ = vbt.send(frame); }
+                    None => break,
+                }
             }
         });
     }
     {
         let mut ar = audio_rx;
         let abt = audio_bcast_tx.clone();
+        let pc = peer_connected.clone();
         tokio::spawn(async move {
-            while let Some(frame) = ar.recv().await {
-                let _ = abt.send(frame);
+            let mut was_idle = true;
+            loop {
+                if !pc.load(std::sync::atomic::Ordering::Relaxed) {
+                    was_idle = true;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+                if was_idle {
+                    was_idle = false;
+                    while ar.try_recv().is_ok() {}
+                }
+                match ar.recv().await {
+                    Some(frame) => { let _ = abt.send(frame); }
+                    None => break,
+                }
             }
         });
     }
@@ -127,6 +158,7 @@ async fn main() -> Result<()> {
         let ice_cfg = cfg.ice.clone();
         let video_fps = cfg.video.fps;
         let kf = keyframe_flag.clone();
+        let pc = peer_connected.clone();
         let webrtc_handle = tokio::spawn(async move {
             if let Err(e) = webrtc::run(
                 ice_cfg,
@@ -139,6 +171,7 @@ async fn main() -> Result<()> {
                 remote_cand_rx,
                 local_cand_tx,
                 kf,
+                pc,
             ).await {
                 error!("webrtc module error: {:#}", e);
             }
@@ -165,10 +198,12 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = webrtc_handle  => {
                 signal_abort.abort();
+                peer_connected.store(false, std::sync::atomic::Ordering::Relaxed);
                 warn!("webrtc session ended, reconnecting in {:?}…", reconnect_delay);
             }
             _ = signal_handle  => {
                 webrtc_abort.abort();
+                peer_connected.store(false, std::sync::atomic::Ordering::Relaxed);
                 warn!("signal session ended, reconnecting in {:?}…", reconnect_delay);
             }
             _ = tokio::signal::ctrl_c() => {

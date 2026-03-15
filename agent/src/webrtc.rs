@@ -35,6 +35,7 @@ pub async fn run(
     mut remote_cand_rx:   Receiver<String>,
     _local_cand_tx:       Sender<String>,
     keyframe_flag:        Arc<AtomicBool>,
+    peer_connected:       Arc<AtomicBool>,
 ) -> Result<()> {
     info!("webrtc: starting");
 
@@ -247,8 +248,9 @@ pub async fn run(
                     }
                 }
                 Output::Event(event) => {
-                    if handle_event(event, &hid_tx, &mut ice_connected, &keyframe_flag).await {
+                    if handle_event(event, &hid_tx, &mut ice_connected, &keyframe_flag, &peer_connected).await {
                         info!("webrtc: session ended, returning for reconnection");
+                        peer_connected.store(false, Ordering::Relaxed);
                         return Ok(());
                     }
                 }
@@ -345,12 +347,13 @@ fn send_audio(rtc: &mut Rtc, mid: Mid, data: &[u8], ts: u32) {
 }
 
 /// 返回 true 表示应退出主循环（ICE 已失败/断开）
-async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut bool, keyframe_flag: &Arc<AtomicBool>) -> bool {
+async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut bool, keyframe_flag: &Arc<AtomicBool>, peer_connected: &Arc<AtomicBool>) -> bool {
     match event {
         Event::Connected => {
             // Both ICE and DTLS are fully established — safe to send media now
             info!("webrtc: ICE+DTLS connected, media can now flow");
             *ice_connected = true;
+            peer_connected.store(true, Ordering::Relaxed);
             keyframe_flag.store(true, Ordering::Relaxed);
         }
         Event::ChannelData(data) => {
@@ -369,6 +372,7 @@ async fn handle_event(event: Event, hid_tx: &Sender<Bytes>, ice_connected: &mut 
                 IceConnectionState::Disconnected => {
                     if *ice_connected {
                         warn!("ICE disconnected after established session, exiting loop");
+                        peer_connected.store(false, Ordering::Relaxed);
                         return true;
                     }
                 }

@@ -17,6 +17,26 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
+/// Try to send a frame; if the channel is full, drop the frame to avoid wasting CPU.
+/// Returns false if the channel is closed (receiver dropped).
+fn try_send_frame(tx: &Sender<Bytes>, frame: Bytes) -> bool {
+    match tx.try_send(frame) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            debug!("video: channel full, dropping frame (backpressure)");
+            true // channel still alive
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
+/// Check if the channel has capacity (can accept a frame).
+/// Used to skip expensive encoding when nobody is consuming frames.
+#[inline]
+fn channel_has_capacity(tx: &Sender<Bytes>) -> bool {
+    tx.capacity() > 0
+}
+
 // V4L2 相关 import（仅 v4l2-capture 路径使用）
 #[cfg(feature = "v4l2-capture")]
 use v4l::buffer::Type;
@@ -167,7 +187,7 @@ fn try_hw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
 
     loop {
         let (buf, _meta) = stream.next()?;
-        if tx.blocking_send(Bytes::copy_from_slice(buf)).is_err() {
+        if !try_send_frame(tx, Bytes::copy_from_slice(buf)) {
             break;
         }
     }
@@ -205,11 +225,17 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
     let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)?;
 
     let mut cfg_mut = cfg.clone();
+    let idle_sleep = std::time::Duration::from_millis(50);
     loop {
-        let (buf, _meta) = stream.next()?;
         if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
             bail!("video_restart: settings changed");
         }
+        // Skip V4L2 dequeue + encoding when channel is full (nobody consuming)
+        if !channel_has_capacity(tx) {
+            std::thread::sleep(idle_sleep);
+            continue;
+        }
+        let (buf, _meta) = stream.next()?;
         if keyframe_flag.swap(false, Ordering::Relaxed) {
             encoder.force_intra_frame();
             debug!("video: forcing IDR frame (keyframe requested)");
@@ -219,7 +245,7 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
         let bitstream = encoder.encode(&src).context("openh264 encode error")?;
         let encoded = Bytes::from(bitstream.to_vec());
         if !encoded.is_empty() {
-            if tx.blocking_send(encoded).is_err() {
+            if !try_send_frame(tx, encoded) {
                 return Ok(());
             }
         }
@@ -257,11 +283,17 @@ fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_
     let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)?;
 
     let mut cfg_mut = cfg.clone();
+    let idle_sleep = std::time::Duration::from_millis(50);
     loop {
-        let (buf, _meta) = stream.next()?;
         if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
             bail!("video_restart: settings changed");
         }
+        // Skip V4L2 dequeue + encoding when channel is full (nobody consuming)
+        if !channel_has_capacity(tx) {
+            std::thread::sleep(idle_sleep);
+            continue;
+        }
+        let (buf, _meta) = stream.next()?;
         if keyframe_flag.swap(false, Ordering::Relaxed) {
             encoder.force_intra_frame();
             debug!("video: forcing IDR frame (keyframe requested)");
@@ -277,7 +309,7 @@ fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_
         let bitstream = encoder.encode(&src).context("openh264 encode error")?;
         let encoded = Bytes::from(bitstream.to_vec());
         if !encoded.is_empty() {
-            if tx.blocking_send(encoded).is_err() {
+            if !try_send_frame(tx, encoded) {
                 return Ok(());
             }
         }
@@ -397,6 +429,18 @@ fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc
         }
         match capturer.frame() {
             Ok(raw) => {
+                // Skip expensive encoding when channel is full (nobody consuming)
+                if !channel_has_capacity(tx) {
+                    // Still sleep to avoid spinning
+                    next_frame += frame_interval;
+                    let now = Instant::now();
+                    if next_frame > now {
+                        thread::sleep(next_frame - now);
+                    } else {
+                        next_frame = now;
+                    }
+                    continue;
+                }
                 // raw: BGRA，stride = raw.len() / disp_h
                 let stride = raw.len() / disp_h;
                 if keyframe_flag.swap(false, Ordering::Relaxed) {
@@ -407,7 +451,7 @@ fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc
                 let src = openh264::formats::YUVBuffer::from_vec(yuv, enc_w, enc_h);
                 let bitstream = encoder.encode(&src).context("openh264 encode error")?;
                 let encoded = Bytes::from(bitstream.to_vec());
-                if !encoded.is_empty() && tx.blocking_send(encoded).is_err() {
+                if !encoded.is_empty() && !try_send_frame(tx, encoded) {
                     return Ok(());
                 }
                 // 限速到目标帧率
