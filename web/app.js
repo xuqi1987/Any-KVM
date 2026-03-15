@@ -15,7 +15,7 @@
 
 const App = (() => {
 
-    const VERSION = '0.2.0';
+    const VERSION = '0.2.1';
 
     // ─── 内置 STUN 服务器列表（自动使用，无需用户填写）────────────────────────
     const _host = window.location.hostname;
