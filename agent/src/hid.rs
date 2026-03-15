@@ -113,6 +113,7 @@ fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std
                 last_buttons = frame[1];
                 last_x = u16::from_be_bytes([frame[2], frame[3]]);
                 last_y = u16::from_be_bytes([frame[4], frame[5]]);
+                debug!("hid: mouse move → ({}, {})", last_x, last_y);
                 if let Some(ref mut m) = mouse {
                     let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
                     if let Err(e) = m.write_all(&report) {

@@ -15,7 +15,7 @@
 
 const App = (() => {
 
-    const VERSION = '0.2.2';
+    const VERSION = '0.2.4';
 
     // ─── 内置 STUN 服务器列表（自动使用，无需用户填写）────────────────────────
     const _host = window.location.hostname;
@@ -210,6 +210,8 @@ const App = (() => {
     function sendHid(buf) {
         if (dc && dc.readyState === 'open') {
             dc.send(buf);
+        } else {
+            console.warn('DataChannel not ready:', dc ? dc.readyState : 'null');
         }
     }
 
@@ -225,6 +227,8 @@ const App = (() => {
         const vh = remoteVideo.clientHeight || 1;
         const ax = Math.min(32767, Math.max(0, Math.round((x / vw) * 32767)));
         const ay = Math.min(32767, Math.max(0, Math.round((y / vh) * 32767)));
+        console.log(`  → abs coords: (${ax}, ${ay})`);
+        // 大端序：高字节在前（agent端用from_be_bytes读取）
         sendHid(new Uint8Array([0x02, hid.buttons,
             (ax >> 8) & 0xff, ax & 0xff,
             (ay >> 8) & 0xff, ay & 0xff,
@@ -309,7 +313,10 @@ const App = (() => {
 
     function onMouseMove(e) {
         const rect = mouseCapture.getBoundingClientRect();
-        sendMouseMove(e.clientX - rect.left, e.clientY - rect.top);
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        console.log(`Mouse move: (${x.toFixed(0)}, ${y.toFixed(0)}) video: ${remoteVideo.clientWidth}×${remoteVideo.clientHeight}`);
+        sendMouseMove(x, y);
     }
 
     function onMouseDown(e) {
