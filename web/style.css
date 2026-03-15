@@ -37,6 +37,17 @@ body {
   display: none !important;
 }
 
+/* 版本标签 */
+.version-tag {
+  font-size: .72rem;
+  color: var(--subtext);
+  background: rgba(255, 255, 255, .06);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  vertical-align: middle;
+}
+
 /* ─── 连接界面 ─────────────────────────────────────────────────────────────── */
 
 #connect-panel {
@@ -452,6 +463,81 @@ body {
   box-shadow: 0 0 0 2px rgba(79, 142, 247, .15);
 }
 
+/* 工具栏分隔符 */
+.toolbar-sep {
+  color: var(--border);
+  font-size: .9rem;
+  margin: 0 2px;
+  user-select: none;
+}
+
+/* 快捷操作下拉菜单 */
+.dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.dropdown-toggle {
+  white-space: nowrap;
+}
+
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  min-width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  margin-top: 4px;
+}
+
+.dropdown:hover .dropdown-menu,
+.dropdown:focus-within .dropdown-menu {
+  display: block;
+}
+
+.dropdown-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 7px 14px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: .82rem;
+  font-family: var(--font);
+  cursor: pointer;
+  text-align: left;
+  transition: background .12s;
+  gap: 12px;
+}
+
+.dropdown-menu button:hover {
+  background: rgba(79, 142, 247, .12);
+}
+
+.dropdown-menu button:active {
+  background: rgba(79, 142, 247, .22);
+}
+
+.dropdown-menu button small {
+  color: var(--subtext);
+  font-size: .72rem;
+  flex-shrink: 0;
+}
+
+.dropdown-menu hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 10px;
+}
+
 /* 视频区域 */
 #video-container {
   flex: 1;
@@ -549,6 +635,24 @@ body {
 .sb-hint {
   margin-left: auto;
   font-style: italic;
+}
+
+/* HID 状态指示器 */
+.sb-hid {
+  font-size: .74rem;
+  padding: 0 4px;
+}
+.sb-hid-ok {
+  color: var(--ok);
+}
+.sb-hid-partial {
+  color: var(--warn);
+}
+.sb-hid-wait {
+  color: var(--subtext);
+}
+.sb-hid-off {
+  color: var(--danger);
 }
 
 /* 全屏时隐藏工具栏和状态栏 */

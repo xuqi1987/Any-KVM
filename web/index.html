@@ -14,7 +14,7 @@
   <div id="connect-panel">
     <div class="connect-card">
       <h1>🖥️ Any-KVM</h1>
-      <p class="subtitle">远程 KVM 控制台</p>
+      <p class="subtitle">远程 KVM 控制台 <span id="app-version" class="version-tag"></span></p>
 
       <!-- 服务器地址行 -->
       <div class="server-row">
@@ -60,11 +60,12 @@
       <span id="status-badge" class="badge badge-connecting">连接中…</span>
       <span id="stats-text" class="stats"></span>
       <div class="spacer"></div>
-      <button class="btn-tool" onclick="App.toggleFullscreen()" title="全屏 (F11)">⛶</button>
-      <button class="btn-tool" id="btn-audio" onclick="App.toggleAudio()" title="音频开关">🔇</button>
+
+      <!-- 画质控制 -->
       <select id="sel-resolution" class="sel-tool" title="分辨率" onchange="App.changeResolution(this.value)">
         <option value="">分辨率</option>
         <option value="640x480">640×480</option>
+        <option value="720x480">720×480</option>
         <option value="1024x768">1024×768</option>
         <option value="1280x720" selected>1280×720</option>
         <option value="1920x1080">1920×1080</option>
@@ -73,11 +74,37 @@
         <option value="">帧率</option>
         <option value="5">5 fps</option>
         <option value="10">10 fps</option>
-        <option value="15" selected>15 fps</option>
+        <option value="15">15 fps</option>
         <option value="24">24 fps</option>
-        <option value="30">30 fps</option>
+        <option value="30" selected>30 fps</option>
       </select>
-      <button class="btn-tool" onclick="App.sendCtrlAltDel()" title="发送 Ctrl+Alt+Del">⌨ CAD</button>
+      <button class="btn-tool" id="btn-adaptive" onclick="App.toggleAdaptive()" title="自适应模式（自动调整画质）">🔄 自适应</button>
+
+      <span class="toolbar-sep">|</span>
+
+      <!-- 快捷操作下拉 -->
+      <div class="dropdown" id="quick-actions">
+        <button class="btn-tool dropdown-toggle" title="快捷操作">⌨ 快捷键 ▾</button>
+        <div class="dropdown-menu">
+          <button onclick="App.sendCtrlAltDel()">Ctrl+Alt+Del</button>
+          <button onclick="App.sendCtrlShiftEsc()">Ctrl+Shift+Esc <small>任务管理器</small></button>
+          <button onclick="App.sendAltTab()">Alt+Tab <small>切换窗口</small></button>
+          <button onclick="App.sendWinKey()">Win / Super <small>开始菜单</small></button>
+          <button onclick="App.sendAltF4()">Alt+F4 <small>关闭窗口</small></button>
+          <hr>
+          <button onclick="App.sendCtrlC()">Ctrl+C <small>复制</small></button>
+          <button onclick="App.sendCtrlV()">Ctrl+V <small>粘贴</small></button>
+          <button onclick="App.sendCtrlA()">Ctrl+A <small>全选</small></button>
+          <button onclick="App.sendCtrlZ()">Ctrl+Z <small>撤销</small></button>
+          <hr>
+          <button onclick="App.sendPrintScreen()">PrintScreen <small>截图</small></button>
+          <button onclick="App.sendEnter()">Enter <small>回车</small></button>
+          <button onclick="App.promptTypeText()">📝 输入文本… <small>逐字符发送</small></button>
+        </div>
+      </div>
+
+      <button class="btn-tool" onclick="App.toggleFullscreen()" title="全屏 (F11)">⛶</button>
+      <button class="btn-tool" id="btn-audio" onclick="App.toggleAudio()" title="音频开关">🔇</button>
       <button class="btn-tool btn-danger" onclick="App.disconnect()" title="断开连接">✕ 断开</button>
     </div>
 
@@ -100,6 +127,7 @@
     <!-- 状态栏 -->
     <div id="statusbar">
       <span id="sb-ice">ICE: —</span>
+      <span id="sb-hid" class="sb-hid sb-hid-off">键鼠: ❌ 未连接</span>
       <span id="sb-resolution">—</span>
       <span id="sb-fps">—</span>
       <span id="sb-latency">延迟: —</span>

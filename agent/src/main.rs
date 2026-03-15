@@ -7,7 +7,7 @@ mod signal_client;
 
 use anyhow::Result;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::time::Duration;
 use tracing::{info, warn, error};
 
@@ -72,9 +72,11 @@ async fn main() -> Result<()> {
 
     // hid 模块：从 DataChannel 收取控制帧
     let (hid_tx, hid_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
+    let hid_status = Arc::new(AtomicU8::new(0));
     let hid_cfg = cfg.hid.clone();
+    let hid_status_clone = hid_status.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = hid::run(hid_cfg, hid_rx, Some(video_ctrl_tx)) {
+        if let Err(e) = hid::run(hid_cfg, hid_rx, Some(video_ctrl_tx), hid_status_clone) {
             error!("hid module error: {:#}", e);
         }
     });
@@ -159,6 +161,7 @@ async fn main() -> Result<()> {
         let video_fps = cfg.video.fps;
         let kf = keyframe_flag.clone();
         let pc = peer_connected.clone();
+        let hs = hid_status.clone();
         let webrtc_handle = tokio::spawn(async move {
             if let Err(e) = webrtc::run(
                 ice_cfg,
@@ -172,6 +175,7 @@ async fn main() -> Result<()> {
                 local_cand_tx,
                 kf,
                 pc,
+                hs,
             ).await {
                 error!("webrtc module error: {:#}", e);
             }

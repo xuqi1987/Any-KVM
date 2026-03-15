@@ -7,10 +7,18 @@
 //!   type=0x04 → 鼠标滚轮 → /dev/hidg1
 
 use crate::config::HidConfig;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+#[cfg(feature = "ch9329")]
+use anyhow::Context;
 use bytes::Bytes;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info, warn};
+
+/// HID 设备状态标志位
+pub const HID_STATUS_KEYBOARD: u8 = 0x01;
+pub const HID_STATUS_MOUSE:    u8 = 0x02;
 
 // ─── 帧类型常量 ───────────────────────────────────────────────────────────────
 const TYPE_KEYBOARD:    u8 = 0x01;
@@ -26,13 +34,13 @@ pub enum VideoControl {
     ChangeFps { fps: u32 },
 }
 
-pub fn run(cfg: HidConfig, rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>) -> Result<()> {
+pub fn run(cfg: HidConfig, rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>, hid_status: Arc<AtomicU8>) -> Result<()> {
     info!("hid: mode={}", cfg.mode);
 
     match cfg.mode.as_str() {
-        "gadget"  => run_gadget(cfg, rx, video_ctrl_tx),
+        "gadget"  => run_gadget(cfg, rx, video_ctrl_tx, hid_status),
         #[cfg(feature = "ch9329")]
-        "ch9329"  => run_ch9329(cfg, rx, video_ctrl_tx),
+        "ch9329"  => run_ch9329(cfg, rx, video_ctrl_tx, hid_status),
         #[cfg(not(feature = "ch9329"))]
         "ch9329"  => bail!("ch9329 support not compiled in; rebuild with --features ch9329"),
         other     => bail!("unknown hid mode: '{}'", other),
@@ -41,20 +49,46 @@ pub fn run(cfg: HidConfig, rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync:
 
 // ─── USB HID Gadget 模式 ──────────────────────────────────────────────────────
 
-fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>) -> Result<()> {
+fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>, hid_status: Arc<AtomicU8>) -> Result<()> {
     use std::io::Write;
     use std::fs::OpenOptions;
 
-    let mut kbd = OpenOptions::new().write(true)
-        .open(&cfg.keyboard_device)
-        .with_context(|| format!("cannot open keyboard gadget {:?}", cfg.keyboard_device))?;
-    let mut mouse = OpenOptions::new().write(true)
-        .open(&cfg.mouse_device)
-        .with_context(|| format!("cannot open mouse gadget {:?}", cfg.mouse_device))?;
+    let mut status: u8 = 0;
 
-    info!("hid: USB Gadget keyboard={:?} mouse={:?}", cfg.keyboard_device, cfg.mouse_device);
+    // 打开 HID 设备为 Option — 失败只警告，不阻止控制消息处理
+    let mut kbd = match OpenOptions::new().write(true).open(&cfg.keyboard_device) {
+        Ok(f) => {
+            info!("hid: keyboard gadget {:?} opened", cfg.keyboard_device);
+            status |= HID_STATUS_KEYBOARD;
+            Some(f)
+        }
+        Err(e) => {
+            warn!("hid: keyboard gadget {:?} unavailable: {} (control messages still work)", cfg.keyboard_device, e);
+            None
+        }
+    };
+    let mut mouse = match OpenOptions::new().write(true).open(&cfg.mouse_device) {
+        Ok(f) => {
+            info!("hid: mouse gadget {:?} opened", cfg.mouse_device);
+            status |= HID_STATUS_MOUSE;
+            Some(f)
+        }
+        Err(e) => {
+            warn!("hid: mouse gadget {:?} unavailable: {} (control messages still work)", cfg.mouse_device, e);
+            None
+        }
+    };
 
-    // Track last known mouse position to avoid cursor jumps on button/wheel events
+    hid_status.store(status, Ordering::Relaxed);
+    info!("hid: device status=0x{:02x} (kbd={}, mouse={})",
+        status, kbd.is_some(), mouse.is_some());
+
+    if kbd.is_some() && mouse.is_some() {
+        info!("hid: USB Gadget mode fully operational");
+    } else {
+        warn!("hid: running in control-only mode (video control via DataChannel still active)");
+    }
+
     let mut last_x: u16 = 0x3fff;
     let mut last_y: u16 = 0x3fff;
     let mut last_buttons: u8 = 0;
@@ -67,52 +101,53 @@ fn run_gadget(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std
         let ty = frame[0];
         match ty {
             TYPE_KEYBOARD => {
-                // USB HID Boot Keyboard 报文：8 字节
-                // [modifier, reserved, key1..key6]
-                let report = [frame[1], 0x00, frame[2], frame[3],
-                              frame[4], frame[5], frame[6], frame[7]];
-                if let Err(e) = kbd.write_all(&report) {
-                    warn!("hid: kbd write error: {e}");
+                if let Some(ref mut k) = kbd {
+                    let report = [frame[1], 0x00, frame[2], frame[3],
+                                  frame[4], frame[5], frame[6], frame[7]];
+                    if let Err(e) = k.write_all(&report) {
+                        warn!("hid: kbd write error: {e}");
+                    }
                 }
             }
             TYPE_MOUSE_MOVE => {
-                // 绝对鼠标报文（需 USB Descriptor 为 Absolute Mouse）
-                // [buttons, abs_x_hi, abs_x_lo, abs_y_hi, abs_y_lo, wheel]
                 last_buttons = frame[1];
                 last_x = u16::from_be_bytes([frame[2], frame[3]]);
                 last_y = u16::from_be_bytes([frame[4], frame[5]]);
-                let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
-                if let Err(e) = mouse.write_all(&report) {
-                    warn!("hid: mouse write error: {e}");
+                if let Some(ref mut m) = mouse {
+                    let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
+                    if let Err(e) = m.write_all(&report) {
+                        warn!("hid: mouse write error: {e}");
+                    }
                 }
             }
             TYPE_MOUSE_BTN => {
                 last_buttons = frame[1];
-                let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
-                if let Err(e) = mouse.write_all(&report) {
-                    warn!("hid: mouse btn write error: {e}");
+                if let Some(ref mut m) = mouse {
+                    let report = make_abs_mouse_report(last_buttons, last_x, last_y, 0);
+                    if let Err(e) = m.write_all(&report) {
+                        warn!("hid: mouse btn write error: {e}");
+                    }
                 }
             }
             TYPE_MOUSE_WHEEL => {
                 let delta = frame[1] as i8;
-                let report = make_abs_mouse_report(last_buttons, last_x, last_y, delta);
-                if let Err(e) = mouse.write_all(&report) {
-                    warn!("hid: mouse wheel write error: {e}");
+                if let Some(ref mut m) = mouse {
+                    let report = make_abs_mouse_report(last_buttons, last_x, last_y, delta);
+                    if let Err(e) = m.write_all(&report) {
+                        warn!("hid: mouse wheel write error: {e}");
+                    }
                 }
             }
             TYPE_CONTROL => {
-                // Video control message
                 if let Some(ref tx) = video_ctrl_tx {
                     match frame[1] {
                         0x01 => {
-                            // Resolution change: [0x10, 0x01, w_hi, w_lo, h_hi, h_lo, 0, 0]
                             let w = u16::from_be_bytes([frame[2], frame[3]]) as u32;
                             let h = u16::from_be_bytes([frame[4], frame[5]]) as u32;
                             info!("hid: control → resolution change {}×{}", w, h);
                             let _ = tx.send(VideoControl::ChangeResolution { width: w, height: h });
                         }
                         0x02 => {
-                            // FPS change: [0x10, 0x02, fps, 0, 0, 0, 0, 0]
                             let fps = frame[2] as u32;
                             info!("hid: control → fps change {}", fps);
                             let _ = tx.send(VideoControl::ChangeFps { fps });
@@ -143,7 +178,7 @@ fn make_abs_mouse_report(buttons: u8, x: u16, y: u16, wheel: i8) -> [u8; 6] {
 // ─── CH9329 串口 HID 模式（回退方案）─────────────────────────────────────────
 
 #[cfg(feature = "ch9329")]
-fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>) -> Result<()> {
+fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std::sync::mpsc::Sender<VideoControl>>, hid_status: Arc<AtomicU8>) -> Result<()> {
     use serialport::SerialPort;
 
     let mut port = serialport::new(&cfg.serial_port, cfg.serial_baud)
@@ -151,6 +186,8 @@ fn run_ch9329(cfg: HidConfig, mut rx: Receiver<Bytes>, video_ctrl_tx: Option<std
         .open()
         .with_context(|| format!("cannot open serial port '{}'", cfg.serial_port))?;
 
+    // CH9329 模式：键盘和鼠标都通过串口，均视为可用
+    hid_status.store(HID_STATUS_KEYBOARD | HID_STATUS_MOUSE, Ordering::Relaxed);
     info!("hid: CH9329 via {} @{}baud", cfg.serial_port, cfg.serial_baud);
 
     let mut last_x: u16 = 0x3fff;

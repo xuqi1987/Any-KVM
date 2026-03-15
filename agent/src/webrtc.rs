@@ -12,10 +12,11 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use str0m::change::SdpAnswer;
+use str0m::channel::ChannelId;
 use str0m::media::{Direction, Frequency, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
@@ -24,9 +25,12 @@ use tokio::sync::broadcast;
 use tokio::net::UdpSocket;
 use tracing::{info, warn, debug};
 
+/// HID 状态报文类型（agent → browser）
+const TYPE_HID_STATUS: u8 = 0x11;
+
 pub async fn run(
     ice_cfg:              IceConfig,
-    video_fps:            u32,
+    _video_fps:           u32,
     mut video_rx:         broadcast::Receiver<Bytes>,
     mut audio_rx:         broadcast::Receiver<Bytes>,
     hid_tx:               Sender<Bytes>,
@@ -36,6 +40,7 @@ pub async fn run(
     _local_cand_tx:       Sender<String>,
     keyframe_flag:        Arc<AtomicBool>,
     peer_connected:       Arc<AtomicBool>,
+    hid_status:           Arc<AtomicU8>,
 ) -> Result<()> {
     info!("webrtc: starting");
 
@@ -138,16 +143,16 @@ pub async fn run(
     let mut ice_connected = false;
     let mut turn_perms: HashSet<IpAddr> = HashSet::new(); // 已创建 permission 的 peer IP
     let mut turn_refresh_at = Instant::now() + Duration::from_secs(240); // TURN refresh
-    let mut video_ts:  u32 = 0;
-    let mut audio_ts:  u32 = 0;
-    let fps = if video_fps > 0 { video_fps } else { 15 };
-    let frame_dur_90k = 90000 / fps;
-    let audio_dur_90k = 960u32; // Opus: 20ms @ 48kHz = 960 samples
+    let mut video_ts:  u32;
+    let mut audio_ts:  u32;
+    let video_start = Instant::now();
+    let audio_start = Instant::now();
     let mut buf = vec![0u8; 65536];
     let mut video_frame_count: u64 = 0;
     let mut video_write_count: u64 = 0;
     let mut video_drop_count: u64 = 0;
     let mut transmit_count: u64 = 0;
+    let mut dc_channel_id: Option<ChannelId> = None;
 
     loop {
         // str0m 会在内部超时后将 alive 设为 false
@@ -195,8 +200,9 @@ pub async fn run(
                         debug!("webrtc: first video frame ({} bytes), NAL types: {}",
                             frame.len(), describe_h264_nals(&frame));
                     }
+                    // 使用实际 elapsed time 计算 RTP 时间戳，FPS 变化时也能正确
+                    video_ts = (video_start.elapsed().as_secs_f64() * 90000.0) as u32;
                     send_video(&mut rtc, video_mid, &frame, video_ts, &mut video_write_count, &mut video_drop_count);
-                    video_ts = video_ts.wrapping_add(frame_dur_90k);
                     if video_frame_count % 300 == 0 {
                         info!("webrtc: video stats — received={}, written={}, dropped={}, udp_tx={}",
                             video_frame_count, video_write_count, video_drop_count, transmit_count);
@@ -211,8 +217,8 @@ pub async fn run(
             // 发送音频帧
             match audio_rx.try_recv() {
                 Ok(frame) => {
+                    audio_ts = (audio_start.elapsed().as_secs_f64() * 48000.0) as u32;
                     send_audio(&mut rtc, audio_mid, &frame, audio_ts);
-                    audio_ts = audio_ts.wrapping_add(audio_dur_90k);
                 }
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                     warn!("webrtc: audio broadcast lagged, skipped {} frames", n);
@@ -248,6 +254,20 @@ pub async fn run(
                     }
                 }
                 Output::Event(event) => {
+                    // 拦截 ChannelOpen 事件，记录 channel ID 并发送 HID 设备状态
+                    if let Event::ChannelOpen(ch_id, ref name) = event {
+                        info!("webrtc: DataChannel opened: {:?} name={}", ch_id, name);
+                        dc_channel_id = Some(ch_id);
+                        let status = hid_status.load(Ordering::Relaxed);
+                        if let Some(mut ch) = rtc.channel(ch_id) {
+                            let msg = [TYPE_HID_STATUS, status, 0, 0, 0, 0, 0, 0];
+                            if let Err(e) = ch.write(true, &msg) {
+                                warn!("webrtc: failed to send HID status: {}", e);
+                            } else {
+                                info!("webrtc: sent HID status 0x{:02x} to browser", status);
+                            }
+                        }
+                    }
                     if handle_event(event, &hid_tx, &mut ice_connected, &keyframe_flag, &peer_connected).await {
                         info!("webrtc: session ended, returning for reconnection");
                         peer_connected.store(false, Ordering::Relaxed);
