@@ -598,9 +598,22 @@ const App = (() => {
     }
 
     function sendCtrlAltDel() {
-        if (!dc || dc.readyState !== 'open') return;
-        sendHid(new Uint8Array([0x01, 0x01 | 0x04, 0x4c, 0, 0, 0, 0, 0]));
-        setTimeout(() => sendHid(new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0])), 30);
+        if (!dc || dc.readyState !== 'open') {
+            console.warn('CAD: DataChannel not open');
+            return;
+        }
+        // Send Ctrl+Alt pressed first, then add Delete, then release all
+        // Step 1: Ctrl+Alt down
+        sendHid(new Uint8Array([0x01, 0x01 | 0x04, 0, 0, 0, 0, 0, 0]));
+        // Step 2: Ctrl+Alt+Del down (after 50ms)
+        setTimeout(() => {
+            sendHid(new Uint8Array([0x01, 0x01 | 0x04, 0x4c, 0, 0, 0, 0, 0]));
+            // Step 3: All keys released (after 150ms hold)
+            setTimeout(() => {
+                sendHid(new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0]));
+                console.log('CAD: Ctrl+Alt+Del sent');
+            }, 150);
+        }, 50);
     }
 
     // ─── 分辨率/帧率控制（通过 DataChannel 发送控制消息）─────────────────────

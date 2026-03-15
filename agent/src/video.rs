@@ -111,7 +111,7 @@ pub fn run_with_ctrl(
                     let dev = Device::with_path(&cfg.device)
                         .with_context(|| format!("cannot open V4L2 device {:?}", cfg.device))?;
 
-                    let hw_ok = cfg.hw_encode && try_hw_h264(&dev, &cfg, &tx).is_ok();
+                    let hw_ok = cfg.hw_encode && try_hw_h264(&dev, &cfg, &tx, &ctrl_rx).is_ok();
                     if !hw_ok {
                         warn!("video: hardware H.264 not available, falling back to openh264");
                         if let Err(e) = run_sw_h264(&dev, &cfg, &tx, &keyframe_flag, &ctrl_rx) {
@@ -137,10 +137,16 @@ pub fn run_with_ctrl(
             Ok(()) => return Ok(()),
             Err(e) => {
                 let msg = format!("{:#}", e);
-                if msg.contains("video_restart") {
-                    // Restart was requested — config already updated via check_video_ctrl
-                    info!("video: restarting with new settings");
-                    // Drain any remaining control messages to get latest config
+                if msg.contains("video_restart:") {
+                    // Parse new config from error message (format: "video_restart:W:H:FPS")
+                    let payload = msg.split("video_restart:").nth(1).unwrap_or("");
+                    let parts: Vec<&str> = payload.split(':').collect();
+                    if parts.len() >= 3 {
+                        if let Ok(w) = parts[0].parse::<u32>() { cfg.width = w; }
+                        if let Ok(h) = parts[1].parse::<u32>() { cfg.height = h; }
+                        if let Ok(f) = parts[2].parse::<u32>() { cfg.fps = f; }
+                    }
+                    // Also drain any additional control messages
                     if let Some(ref rx) = ctrl_rx {
                         while let Ok(cmd) = rx.try_recv() {
                             match cmd {
@@ -154,6 +160,7 @@ pub fn run_with_ctrl(
                             }
                         }
                     }
+                    info!("video: restarting with settings {}×{}@{}fps", cfg.width, cfg.height, cfg.fps);
                     continue;
                 }
                 return Err(e);
@@ -165,7 +172,7 @@ pub fn run_with_ctrl(
 // ─── 硬件 H.264（V4L2 直接输出 H.264，典型于 Amlogic / Rockchip）────────────
 
 #[cfg(feature = "v4l2-capture")]
-fn try_hw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()> {
+fn try_hw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, ctrl_rx: &Option<std::sync::mpsc::Receiver<crate::hid::VideoControl>>) -> Result<()> {
     let mut fmt = dev.format()?;
     fmt.width  = cfg.width;
     fmt.height = cfg.height;
@@ -185,7 +192,16 @@ fn try_hw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>) -> Result<()
     let mut stream = v4l::io::mmap::Stream::with_buffers(dev, Type::VideoCapture, 4)
         .context("failed to create V4L2 mmap stream")?;
 
+    let mut cfg_mut = cfg.clone();
+    let idle_sleep = std::time::Duration::from_millis(50);
     loop {
+        if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
+            bail!("video_restart:{}:{}:{}", cfg_mut.width, cfg_mut.height, cfg_mut.fps);
+        }
+        if !channel_has_capacity(tx) {
+            std::thread::sleep(idle_sleep);
+            continue;
+        }
         let (buf, _meta) = stream.next()?;
         if !try_send_frame(tx, Bytes::copy_from_slice(buf)) {
             break;
@@ -228,7 +244,7 @@ fn run_sw_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_fla
     let idle_sleep = std::time::Duration::from_millis(50);
     loop {
         if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
-            bail!("video_restart: settings changed");
+            bail!("video_restart:{}:{}:{}", cfg_mut.width, cfg_mut.height, cfg_mut.fps);
         }
         // Skip V4L2 dequeue + encoding when channel is full (nobody consuming)
         if !channel_has_capacity(tx) {
@@ -286,7 +302,7 @@ fn run_mjpeg_h264(dev: &Device, cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_
     let idle_sleep = std::time::Duration::from_millis(50);
     loop {
         if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
-            bail!("video_restart: settings changed");
+            bail!("video_restart:{}:{}:{}", cfg_mut.width, cfg_mut.height, cfg_mut.fps);
         }
         // Skip V4L2 dequeue + encoding when channel is full (nobody consuming)
         if !channel_has_capacity(tx) {
@@ -425,7 +441,7 @@ fn run_screen_capture(cfg: &VideoConfig, tx: &Sender<Bytes>, keyframe_flag: &Arc
     loop {
         // Check for control messages
         if check_video_ctrl(ctrl_rx, &mut cfg_mut) {
-            bail!("video_restart: settings changed");
+            bail!("video_restart:{}:{}:{}", cfg_mut.width, cfg_mut.height, cfg_mut.fps);
         }
         match capturer.frame() {
             Ok(raw) => {
