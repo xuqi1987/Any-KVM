@@ -429,7 +429,21 @@ const App = (() => {
         };
 
         pc.ondatachannel = ({ channel }) => {
-            channel.onmessage = ({ data }) => console.log('dc from device:', data);
+            channel.binaryType = 'arraybuffer';
+            channel.onmessage = ({ data }) => {
+                if (data instanceof ArrayBuffer) {
+                    const buf = new Uint8Array(data);
+                    if (buf.length >= 2 && buf[0] === 0x11) {
+                        hidStatusReceived = true;
+                        hidKeyboard = !!(buf[1] & 0x01);
+                        hidMouse = !!(buf[1] & 0x02);
+                        console.log(`HID status (device ch): kbd=${hidKeyboard} mouse=${hidMouse}`);
+                        updateHidStatusUI();
+                    }
+                } else {
+                    console.log('dc from device:', data);
+                }
+            };
         };
 
         return pc;
